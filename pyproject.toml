@@ -1,0 +1,165 @@
+[tool.poetry]
+name = "celery-fastapi"
+version = "0.1.1"
+description = "Automatic REST API generation for Celery tasks with FastAPI"
+authors = ["ilkerkara <ilkerkara@outlook.com.tr>"]
+license = "MIT"
+readme = "README.md"
+homepage = "https://github.com/karailker/celery-fastapi"
+repository = "https://github.com/karailker/celery-fastapi"
+documentation = "https://github.com/karailker/celery-fastapi#readme"
+keywords = ["celery", "fastapi", "rest", "api", "tasks", "async", "queue"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Web Environment",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+    "Topic :: System :: Distributed Computing",
+    "Typing :: Typed",
+]
+packages = [{ include = "celery_fastapi" }]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+fastapi = ">=0.100.0"
+celery = ">=5.3.0"
+pydantic = ">=2.0.0"
+
+# Server dependencies (optional)
+uvicorn = { version = ">=0.23.0", extras = ["standard"], optional = true }
+gunicorn = { version = ">=21.0.0", optional = true }
+
+# CLI dependencies (optional)
+typer = { version = ">=0.9.0", optional = true }
+rich = { version = ">=13.0.0", optional = true }
+
+# Celery broker/backend dependencies (optional)
+redis = { version = ">=5.0.0", optional = true }
+kombu = { version = ">=5.3.0", optional = true }
+
+# Celery concurrency pool dependencies (optional)
+eventlet = { version = ">=0.33.0", optional = true }
+gevent = { version = ">=23.0.0", optional = true }
+
+# Additional FastAPI dependencies (optional)
+python-multipart = { version = ">=0.0.6", optional = true }
+httpx = { version = ">=0.27.0", optional = true }
+orjson = { version = ">=3.9.0", optional = true }
+ujson = { version = ">=5.8.0", optional = true }
+
+[tool.poetry.extras]
+# Core server extras
+uvicorn = ["uvicorn"]
+gunicorn = ["gunicorn", "uvicorn"]
+server = ["uvicorn"]
+
+# CLI
+cli = ["typer", "rich", "uvicorn"]
+
+# Celery brokers/backends
+redis = ["redis"]
+rabbitmq = ["kombu"]
+
+# Celery pools
+eventlet = ["eventlet"]
+gevent = ["gevent"]
+
+# FastAPI extras
+multipart = ["python-multipart"]
+orjson = ["orjson"]
+ujson = ["ujson"]
+
+# Bundle extras
+standard = ["uvicorn", "redis", "typer", "rich"]
+all = [
+    "uvicorn",
+    "gunicorn",
+    "typer",
+    "rich",
+    "redis",
+    "kombu",
+    "python-multipart",
+    "orjson",
+    "httpx",
+]
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0.0"
+pytest-cov = "^4.1.0"
+pytest-asyncio = "^0.23.0"
+httpx = "^0.27.0"
+mypy = "^1.8.0"
+ruff = "^0.3.0"
+pre-commit = "^3.6.0"
+redis = "^5.0.0"
+uvicorn = { version = ">=0.23.0", extras = ["standard"] }
+typer = ">=0.9.0"
+rich = ">=13.0.0"
+
+[tool.poetry.scripts]
+celery-fastapi = "celery_fastapi.cli:app"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # Pyflakes
+    "I",      # isort
+    "B",      # flake8-bugbear
+    "C4",     # flake8-comprehensions
+    "UP",     # pyupgrade
+    "ARG",    # flake8-unused-arguments
+    "SIM",    # flake8-simplify
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "B008",   # do not perform function calls in argument defaults
+    "B904",   # raise without from inside except
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["celery_fastapi"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+strict_optional = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-v --cov=celery_fastapi --cov-report=term-missing --cov-report=xml"
+
+[tool.coverage.run]
+source = ["celery_fastapi"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]

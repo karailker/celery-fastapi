@@ -66,7 +66,7 @@ class TestCreateApp:
         """Test that created app routes work correctly."""
         response = created_app_client.post(
             "/test_app/add",
-            json={"args": [1, 2]},
+            json={"x": 1, "y": 2},
         )
         assert response.status_code == 200
         assert "task_id" in response.json()

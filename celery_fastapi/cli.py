@@ -72,6 +72,30 @@ app = typer.Typer(
 console = Console()
 
 
+def _create_app_from_env() -> Any:
+    """
+    Factory function to create FastAPI app from environment variables.
+
+    This is used when running with multiple workers or reload enabled,
+    as uvicorn requires an import string in these cases.
+    """
+    from celery_fastapi.app import create_app
+
+    celery_app = os.environ.get("CELERY_FASTAPI_CELERY_APP")
+    prefix = os.environ.get("CELERY_FASTAPI_PREFIX", "")
+    root_path = os.environ.get("CELERY_FASTAPI_ROOT_PATH", "")
+
+    if not celery_app:
+        raise ValueError("CELERY_FASTAPI_CELERY_APP environment variable not set")
+
+    return create_app(
+        celery_app,
+        title="Celery FastAPI",
+        prefix=prefix,
+        fastapi_kwargs={"root_path": root_path} if root_path else None,
+    )
+
+
 def version_callback(value: bool) -> None:
     """Print version and exit."""
     if value:
@@ -374,7 +398,19 @@ def serve(
     console.print("[dim]Press CTRL+C to stop[/]\n")
 
     # Run the server
-    uvicorn.run(fastapi_app, **uvicorn_config)
+    # When using workers > 1 or reload, we need to use an import string
+    if workers > 1 or reload:
+        # Set environment variables for the factory to use
+        os.environ["CELERY_FASTAPI_CELERY_APP"] = celery_app
+        os.environ["CELERY_FASTAPI_PREFIX"] = prefix
+        if root_path:
+            os.environ["CELERY_FASTAPI_ROOT_PATH"] = root_path
+
+        # Use the factory function as an import string
+        uvicorn.run("celery_fastapi.cli:_create_app_from_env", **uvicorn_config)
+    else:
+        # Single worker, can use app instance directly
+        uvicorn.run(fastapi_app, **uvicorn_config)
 
 
 @app.command()

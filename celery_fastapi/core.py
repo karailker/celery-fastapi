@@ -1,8 +1,9 @@
 """Core functionality for Celery FastAPI."""
 
 import inspect
+from collections.abc import Callable
 from datetime import datetime
-from typing import Any, Callable, get_type_hints
+from typing import Any, get_type_hints
 
 from celery import Celery
 from celery.result import AsyncResult
@@ -222,7 +223,7 @@ def _create_task_payload_model(
     model_name = f"{task_name.replace('.', '_').title().replace('_', '')}Payload"
 
     # Create and return the dynamic model
-    model: type[BaseModel] = create_model(model_name, **field_definitions)  # type: ignore[call-overload]
+    model: type[BaseModel] = create_model(model_name, **field_definitions)
     model.__doc__ = f"Payload for {task_name} task. Default queue: {default_queue}"
 
     # Set model config for examples
@@ -324,7 +325,7 @@ class CeleryFastAPIBridge:
 
         # Store the registered task names from THIS app only
         self._app_task_names: set[str] = set()
-        for name in self.celery_app.tasks.keys():
+        for name in self.celery_app.tasks:
             if self.task_filter(name):
                 self._app_task_names.add(name)
 
@@ -403,7 +404,9 @@ class CeleryFastAPIBridge:
             celery_option_names = set(CELERY_OPTIONS_FIELDS.keys())
             task_kwargs: dict[str, Any] = {}
 
-            for field_name in payload.model_fields:
+            # Access model_fields from the class, not the instance (Pydantic V2.11+)
+            payload_fields = type(payload).model_fields  # type: ignore[attr-defined]
+            for field_name in payload_fields:
                 if field_name not in celery_option_names:
                     value = getattr(payload, field_name, None)
                     if value is not None:
@@ -751,8 +754,8 @@ class CeleryFastAPIBridge:
         routes: list[dict[str, str]] = []
         for route in self.fastapi_app.routes:
             if hasattr(route, "path") and hasattr(route, "methods"):
-                path = getattr(route, "path")
-                methods = getattr(route, "methods")
+                path = route.path
+                methods = route.methods
                 for method in methods:
                     if method != "HEAD":
                         routes.append({"path": path, "method": method})

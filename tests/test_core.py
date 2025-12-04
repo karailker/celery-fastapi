@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from celery_fastapi import CeleryFastAPIBridge
-from celery_fastapi.core import TaskPayload
+from celery_fastapi.core import GenericTaskPayload
 
 
 class TestCeleryFastAPIBridge:
@@ -49,9 +49,7 @@ class TestCeleryFastAPIBridge:
         bridge.register_routes()
         assert bridge._registered is True
 
-    def test_task_endpoints_created(
-        self, app_with_routes: FastAPI, celery_app: Celery
-    ) -> None:
+    def test_task_endpoints_created(self, app_with_routes: FastAPI) -> None:
         """Test that task endpoints are created for registered tasks."""
         routes = [route.path for route in app_with_routes.routes]
         assert "/test_app/add" in routes
@@ -91,23 +89,29 @@ class TestCeleryFastAPIBridge:
         assert all("path" in route and "method" in route for route in routes)
 
 
-class TestTaskPayload:
-    """Tests for TaskPayload model."""
+class TestGenericTaskPayload:
+    """Tests for GenericTaskPayload model."""
 
-    def test_default_values(self) -> None:
-        """Test default values for TaskPayload."""
-        payload = TaskPayload()
+    def test_required_fields(self) -> None:
+        """Test GenericTaskPayload with required fields."""
+        payload = GenericTaskPayload(task_name="test.task", queue="celery")
+        assert payload.task_name == "test.task"
+        assert payload.queue == "celery"
         assert payload.args == []
         assert payload.kwargs == {}
 
     def test_with_args(self) -> None:
-        """Test TaskPayload with args."""
-        payload = TaskPayload(args=[1, 2, 3])
+        """Test GenericTaskPayload with args."""
+        payload = GenericTaskPayload(
+            task_name="test.task", queue="celery", args=[1, 2, 3]
+        )
         assert payload.args == [1, 2, 3]
 
     def test_with_kwargs(self) -> None:
-        """Test TaskPayload with kwargs."""
-        payload = TaskPayload(kwargs={"key": "value"})
+        """Test GenericTaskPayload with kwargs."""
+        payload = GenericTaskPayload(
+            task_name="test.task", queue="celery", kwargs={"key": "value"}
+        )
         assert payload.kwargs == {"key": "value"}
 
 
@@ -118,7 +122,7 @@ class TestTaskEndpoints:
         """Test executing a task via endpoint."""
         response = client.post(
             "/test_app/add",
-            json={"args": [2, 3], "kwargs": {}},
+            json={"x": 2, "y": 3},
         )
         assert response.status_code == 200
         data = response.json()
@@ -128,19 +132,20 @@ class TestTaskEndpoints:
         """Test executing a task with kwargs."""
         response = client.post(
             "/test_app/greet",
-            json={"args": [], "kwargs": {"name": "World"}},
+            json={"name": "World"},
         )
         assert response.status_code == 200
         data = response.json()
         assert "task_id" in data
 
-    def test_execute_task_empty_payload(self, client: TestClient) -> None:
-        """Test executing a task with empty payload."""
+    def test_execute_task_missing_required_params(self, client: TestClient) -> None:
+        """Test executing a task with missing required parameters returns 422."""
         response = client.post(
             "/test_app/add",
             json={},
         )
-        assert response.status_code == 200
+        # Should fail validation because x and y are required
+        assert response.status_code == 422
 
 
 class TestStatusEndpoints:

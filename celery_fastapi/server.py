@@ -10,7 +10,7 @@ if TYPE_CHECKING:
 
 def create_gunicorn_app(
     app: Any, options: dict[str, Any] | None = None
-) -> "BaseApplication":
+) -> BaseApplication:
     """Create a Gunicorn application instance.
 
     Args:
@@ -31,7 +31,7 @@ def create_gunicorn_app(
             "Install with: pip install celery-fastapi[gunicorn]"
         ) from exc
 
-    class _GunicornApp(BaseApplication):  # type: ignore[misc]
+    class _GunicornApp(BaseApplication):
         """Internal Gunicorn application wrapper."""
 
         def __init__(

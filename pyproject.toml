@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "celery-fastapi"
-version = "0.1.1"
+version = "0.1.3"
 description = "Automatic REST API generation for Celery tasks with FastAPI"
 authors = ["ilkerkara <ilkerkara@outlook.com.tr>"]
 license = "MIT"

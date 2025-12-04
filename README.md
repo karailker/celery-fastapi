@@ -3,7 +3,11 @@
 [![CI](https://github.com/karailker/celery-fastapi/actions/workflows/ci.yml/badge.svg)](https://github.com/karailker/celery-fastapi/actions/workflows/ci.yml)
 [![PyPI version](https://badge.fury.io/py/celery-fastapi.svg)](https://badge.fury.io/py/celery-fastapi)
 [![Python Version](https://img.shields.io/pypi/pyversions/celery-fastapi.svg)](https://pypi.org/project/celery-fastapi/)
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/celery-fastapi?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/celery-fastapi)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+![GitHub Repo stars](https://img.shields.io/github/stars/karailker/celery-fastapi)
+<!-- ![GitHub forks](https://img.shields.io/github/forks/karailker/celery-fastapi) -->
 
 Automatic REST API generation for Celery tasks with FastAPI. This package seamlessly bridges Celery and FastAPI, automatically creating REST endpoints for all your registered Celery tasks.
 

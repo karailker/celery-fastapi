@@ -799,7 +799,7 @@ def workers(
 
 @app.callback()
 def main(
-    version: Annotated[
+    version: Annotated[  # noqa: ARG001
         bool | None,
         typer.Option(
             "--version",
@@ -816,7 +816,6 @@ def main(
     Generate FastAPI endpoints for your Celery tasks automatically.
     Supports uvicorn and gunicorn for production deployment.
     """
-    pass
 
 
 if __name__ == "__main__":

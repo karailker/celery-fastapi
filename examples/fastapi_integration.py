@@ -4,13 +4,24 @@ This demonstrates how to add Celery task endpoints to your existing
 FastAPI application alongside your own custom routes.
 
 Run:
+    # Start Celery worker
+    celery -A examples.celery_app worker --loglevel=info
+
+    # Start FastAPI server
+    uvicorn examples.fastapi_integration:app --reload
+
+    # With custom worker hostname for health checks
+    export CELERY_WORKER_HOSTNAME="celery@worker1"
+    celery -A examples.celery_app worker --hostname worker1
     uvicorn examples.fastapi_integration:app --reload
 
 Endpoints:
-    GET  /              - Root endpoint (custom)
-    GET  /health        - Health check (custom)
-    POST /api/tasks/*   - Celery task endpoints (auto-generated)
-    GET  /api/tasks/tasks/{task_id} - Task status
+    GET  /                      - Root endpoint (custom)
+    GET  /health                - Health check (custom)
+    POST /api/tasks/*           - Celery task endpoints (auto-generated)
+    GET  /api/tasks/tasks/{id}  - Task status
+    GET  /api/tasks/healthz     - Celery worker health check
+    GET  /api/tasks/ping        - Celery worker ping
 """
 
 from fastapi import FastAPI

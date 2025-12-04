@@ -165,3 +165,33 @@ class TestStatusEndpoints:
         assert "scheduled" in data
         assert "reserved" in data
         assert "revoked" in data
+
+
+class TestHealthEndpoints:
+    """Tests for health check and ping endpoints."""
+
+    def test_health_check_endpoint(self, client: TestClient) -> None:
+        """Test the health check endpoint returns expected structure."""
+        response = client.get("/healthz")
+        assert response.status_code == 200
+        data = response.json()
+        assert "status" in data
+        assert "celery_app" in data
+        assert "broker_connected" in data
+        assert "worker_hostname" in data
+        assert "worker_online" in data
+        assert data["celery_app"] == "test_app"
+
+    def test_ping_endpoint(self, client: TestClient) -> None:
+        """Test the ping endpoint returns expected structure."""
+        response = client.get("/ping")
+        assert response.status_code == 200
+        data = response.json()
+        assert "worker_hostname" in data
+        assert "online" in data
+        assert "response" in data
+        assert isinstance(data["online"], bool)
+        # worker_hostname can be None if no local worker found
+        assert data["worker_hostname"] is None or isinstance(
+            data["worker_hostname"], str
+        )

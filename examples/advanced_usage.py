@@ -4,9 +4,21 @@ This example shows:
 - Full Celery task options (countdown, priority, queue, time limits)
 - Task filtering
 - Custom FastAPI configuration
+- Health check and monitoring endpoints
 - Production-ready setup
 
 Run:
+    # Start Celery worker
+    celery -A examples.celery_app worker --loglevel=info -Q celery,high_priority
+
+    # Or with custom hostname
+    celery -A examples.celery_app worker --hostname worker1 -Q celery,high_priority
+
+    # Start FastAPI server
+    uvicorn examples.advanced_usage:app --reload
+
+    # With custom worker hostname for health checks
+    export CELERY_WORKER_HOSTNAME="celery@worker1"
     uvicorn examples.advanced_usage:app --reload
 
 Or with gunicorn for production:

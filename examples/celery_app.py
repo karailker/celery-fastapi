@@ -3,11 +3,18 @@
 Run the Celery worker (include all queues your tasks use):
     celery -A examples.celery_app worker --loglevel=info -Q celery,high_priority
 
+    # Or with custom hostname (requires CELERY_WORKER_HOSTNAME for health checks)
+    celery -A examples.celery_app worker --hostname worker1 -Q celery,high_priority
+
 Then run the FastAPI server (choose one):
     # Using CLI
     celery-fastapi serve examples.celery_app:celery_app
 
     # Using CLI with options
+    celery-fastapi serve examples.celery_app:celery_app --port 8000 --reload
+
+    # With custom worker hostname for health checks
+    export CELERY_WORKER_HOSTNAME="celery@worker1"
     celery-fastapi serve examples.celery_app:celery_app --port 8000 --reload
 
     # Using Python module

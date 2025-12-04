@@ -107,25 +107,29 @@ uvicorn myapp:app --reload
 
 ```bash
 # Start the server (development)
-celery-fastapi serve myapp.celery:celery_app --port 8000 --reload
+celery-fastapi serve examples.celery_app:celery_app --port 8000 --reload
 
 # Production with multiple workers
-celery-fastapi serve myapp.celery:celery_app -w 4 --host 0.0.0.0
+celery-fastapi serve examples.celery_app:celery_app -w 4 --host 0.0.0.0
+
+# With custom worker hostname (for health checks)
+export CELERY_WORKER_HOSTNAME="celery@worker1"
+celery-fastapi serve examples.celery_app:celery_app --port 8000
 
 # With SSL
-celery-fastapi serve myapp.celery:celery_app --ssl-keyfile key.pem --ssl-certfile cert.pem
+celery-fastapi serve examples.celery_app:celery_app --ssl-keyfile key.pem --ssl-certfile cert.pem
 
 # Using gunicorn (production)
-celery-fastapi serve-gunicorn myapp.celery:celery_app -w 4 -k uvicorn.workers.UvicornWorker
+celery-fastapi serve-gunicorn examples.celery_app:celery_app -w 4 -k uvicorn.workers.UvicornWorker
 
 # List available routes
-celery-fastapi routes myapp.celery:celery_app
+celery-fastapi routes examples.celery_app:celery_app
 
 # List registered tasks
-celery-fastapi tasks myapp.celery:celery_app
+celery-fastapi tasks examples.celery_app:celery_app
 
 # Show active workers
-celery-fastapi workers myapp.celery:celery_app
+celery-fastapi workers examples.celery_app:celery_app
 ```
 
 ## API Endpoints
@@ -219,6 +223,44 @@ GET /queues
 POST /purge
 ```
 
+### Health Check and Monitoring
+
+```bash
+# Health check for local Celery worker
+GET /healthz
+
+# Response
+{
+    "status": "healthy",
+    "celery_app": "example_tasks",
+    "broker_connected": true,
+    "worker_hostname": "celery@worker1",
+    "worker_online": true
+}
+
+# Ping local Celery worker
+GET /ping
+
+# Response
+{
+    "worker_hostname": "celery@worker1",
+    "online": true,
+    "response": {"ok": "pong"}
+}
+```
+
+**Note:** Health and ping endpoints automatically discover the local worker using:
+1. `CELERY_WORKER_HOSTNAME` environment variable (recommended for custom hostnames)
+2. Hostname matching (when worker and API share the same hostname)
+3. Single worker fallback (when only one worker has this app's tasks)
+
+**For custom worker hostnames**, set the environment variable:
+```bash
+export CELERY_WORKER_HOSTNAME="celery@worker1"
+celery -A examples.celery_app worker --hostname worker1
+celery-fastapi serve examples.celery_app:celery_app --port 8000
+```
+
 ### List All Tasks
 
 ```bash
@@ -298,7 +340,7 @@ Commands:
   workers          Show active Celery workers
 
 # Serve options (uvicorn)
-celery-fastapi serve myapp:celery_app \
+celery-fastapi serve examples.celery_app:celery_app \
     --host 0.0.0.0 \
     --port 8000 \
     --reload \
@@ -311,7 +353,7 @@ celery-fastapi serve myapp:celery_app \
     --forwarded-allow-ips '*'
 
 # Serve options (gunicorn)
-celery-fastapi serve-gunicorn myapp:celery_app \
+celery-fastapi serve-gunicorn examples.celery_app:celery_app \
     --bind 0.0.0.0:8000 \
     --workers 4 \
     --worker-class uvicorn.workers.UvicornWorker \

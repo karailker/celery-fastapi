@@ -271,6 +271,30 @@ class TaskRevokePayload(BaseModel):
     )
 
 
+class HealthCheckResponse(BaseModel):
+    """Response model for health check endpoint."""
+
+    status: str = Field(description="Overall health status (healthy/unhealthy)")
+    celery_app: str = Field(description="Celery application name")
+    broker_connected: bool = Field(description="Whether broker connection is active")
+    worker_hostname: str | None = Field(
+        default=None, description="Target worker hostname"
+    )
+    worker_online: bool = Field(description="Whether the target worker is online")
+
+
+class PingResponse(BaseModel):
+    """Response model for worker ping endpoint."""
+
+    worker_hostname: str | None = Field(
+        default=None, description="Target worker hostname"
+    )
+    online: bool = Field(description="Whether the worker responded to ping")
+    response: dict[str, str] | None = Field(
+        default=None, description="Ping response from the worker"
+    )
+
+
 class CeleryFastAPIBridge:
     """
     Bridge class that connects Celery tasks to FastAPI endpoints.
@@ -671,6 +695,180 @@ class CeleryFastAPIBridge:
             """Get information about active queues."""
             inspector = self.celery_app.control.inspect()
             return {"queues": inspector.active_queues() or {}}
+
+        def _find_local_worker() -> str | None:
+            """
+            Find the Celery worker running on the same host.
+
+            Celery worker hostnames follow the pattern: prefix@hostname
+            where prefix can be any format (e.g., celery, appname_uuid, etc.).
+
+            Matching strategy:
+            1. CELERY_WORKER_HOSTNAME environment variable (RECOMMENDED)
+               Set this to the exact worker name when starting both worker and API
+               Example: export CELERY_WORKER_HOSTNAME="celery@worker1"
+
+            2. Hostname matching (works when worker and API share same hostname):
+               - Exact match: worker hostname part equals socket.gethostname()
+               - Partial match: handles FQDN vs short hostname
+
+            3. Single worker fallback (only when one worker exists for this app)
+
+            Note: When using custom --hostname, always set CELERY_WORKER_HOSTNAME
+            to ensure correct worker discovery.
+
+            Examples:
+            - Standard: celery@myhost (auto-discovered)
+            - Custom: celery@worker1 (needs CELERY_WORKER_HOSTNAME="celery@worker1")
+            - UUID: myapp_abc123@myhost (auto-discovered if hostname matches)
+            """
+            import os
+            import socket
+
+            # Strategy 1: Check for explicit environment variable (RECOMMENDED)
+            env_worker = os.environ.get("CELERY_WORKER_HOSTNAME")
+            if env_worker:
+                try:
+                    inspector = self.celery_app.control.inspect(timeout=1.0)
+                    env_ping_response: dict[str, Any] = inspector.ping() or {}
+                    if env_worker in env_ping_response:
+                        return str(env_worker)
+                    # If env var is set but worker not found, log and continue
+                except Exception:  # noqa: BLE001
+                    pass
+
+            local_hostname = socket.gethostname()
+
+            try:
+                inspector = self.celery_app.control.inspect(timeout=1.0)
+
+                # Get all active workers
+                ping_response: dict[str, Any] = inspector.ping() or {}
+                if not ping_response:
+                    return None
+
+                # Strategy 2: Hostname-based matching
+                # First pass: exact hostname match
+                for worker_name in ping_response:
+                    if "@" in worker_name:
+                        _, worker_host = worker_name.rsplit("@", 1)
+                        if worker_host == local_hostname:
+                            return str(worker_name)
+                    elif worker_name == local_hostname:
+                        return str(worker_name)
+
+                # Second pass: partial hostname match (FQDN vs short name)
+                for worker_name in ping_response:
+                    if "@" in worker_name:
+                        _, worker_host = worker_name.rsplit("@", 1)
+                        if (
+                            local_hostname in worker_host
+                            or worker_host in local_hostname
+                        ):
+                            return str(worker_name)
+
+                # Strategy 3: Filter by app tasks and check for single worker
+                registered: dict[str, list[str]] = inspector.registered() or {}
+                app_workers = []
+                for worker_name in ping_response:
+                    worker_tasks = registered.get(worker_name, [])
+                    if any(task in self._app_task_names for task in worker_tasks):
+                        app_workers.append(worker_name)
+
+                # If only one worker has this app's tasks, assume it's local
+                if len(app_workers) == 1:
+                    return str(app_workers[0])
+
+                # If multiple workers with same tasks exist and hostname doesn't match,
+                # we cannot determine which is local without CELERY_WORKER_HOSTNAME
+                return None
+            except Exception:  # noqa: BLE001
+                return None
+
+        @self.fastapi_app.get(
+            f"{self.prefix}/healthz",
+            response_model=HealthCheckResponse,
+            tags=["health"],
+            summary="Health check",
+        )
+        async def health_check() -> HealthCheckResponse:
+            """
+            Check the health of the local Celery worker.
+
+            Automatically discovers the worker running on the same host by
+            matching the system hostname with active Celery worker hostnames.
+
+            Returns:
+                Health status including broker connection and worker availability.
+
+            This endpoint is useful for:
+            - Kubernetes/Docker health probes (sidecar pattern)
+            - Load balancer health checks
+            - Monitoring systems
+            """
+            try:
+                broker_connected = True
+                local_worker = _find_local_worker()
+                worker_online = local_worker is not None
+
+            except Exception:  # noqa: BLE001
+                broker_connected = False
+                local_worker = None
+                worker_online = False
+
+            # Determine overall health status
+            status = "healthy" if broker_connected and worker_online else "unhealthy"
+
+            return HealthCheckResponse(
+                status=status,
+                celery_app=self.celery_app.main,
+                broker_connected=broker_connected,
+                worker_hostname=local_worker,
+                worker_online=worker_online,
+            )
+
+        @self.fastapi_app.get(
+            f"{self.prefix}/ping",
+            response_model=PingResponse,
+            tags=["health"],
+            summary="Ping worker",
+        )
+        async def ping_worker() -> PingResponse:
+            """
+            Ping the local Celery worker.
+
+            Automatically discovers the worker running on the same host by
+            matching the system hostname with active Celery worker hostnames.
+
+            Returns:
+                Ping response from the local worker.
+
+            This endpoint is useful for:
+            - Checking local worker responsiveness
+            - Diagnosing connection issues
+            - Verifying worker health in containerized deployments
+            """
+            local_worker = _find_local_worker()
+
+            if not local_worker:
+                # No local worker found
+                return PingResponse(
+                    worker_hostname=None,
+                    online=False,
+                    response=None,
+                )
+
+            # Ping the specific local worker
+            inspector = self.celery_app.control.inspect(destination=[local_worker])
+            ping_response = inspector.ping() or {}
+
+            worker_response = ping_response.get(local_worker)
+
+            return PingResponse(
+                worker_hostname=local_worker,
+                online=worker_response is not None,
+                response=worker_response,
+            )
 
         @self.fastapi_app.post(
             f"{self.prefix}/purge",

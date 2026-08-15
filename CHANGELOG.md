@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4] - 2026-08-15
+
+### Added
+
+- Unified `publish_release.yml` workflow: builds, publishes to PyPI via trusted publishing (OIDC), generates changelog with git-cliff, and creates GitHub Release with `whl`/`tar.gz` artifacts
+- Poetry 2.4.1 support in CI
+- Celery upper bound constrained to `<=5.6.3` (tested end-to-end)
+- Tag-driven dynamic versioning via `poetry-dynamic-versioning` (version derived from git tags)
+
+### Fixed
+
+- Health/ping, batch, and rate-limit endpoints now registered in `register_routes()` (parity with `create_app()` factory)
+- Input validation tests use `raise AssertionError` instead of `assert False` (ruff B011)
+- Unused import and consistency lint errors fixed (F401, F541)
+
 ## [0.1.3] - 2026-08-15
 
 ### Added

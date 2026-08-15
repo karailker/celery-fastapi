@@ -1,5 +1,6 @@
 """Core functionality for Celery FastAPI."""
 
+import asyncio
 import inspect
 import time
 from collections import defaultdict, deque
@@ -9,8 +10,14 @@ from typing import Any, get_type_hints
 
 from celery import Celery
 from celery.result import AsyncResult
-import asyncio
-from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import (
+    FastAPI,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from pydantic import BaseModel, Field, ValidationInfo, create_model, field_validator
 
 # Celery execution options - shared fields for all task payloads
@@ -674,9 +681,7 @@ class CeleryFastAPIBridge:
             return result.result
 
         @self.fastapi_app.websocket(f"{self.prefix}/tasks/{{task_id}}/ws")
-        async def stream_task_status(
-            websocket: WebSocket, task_id: str
-        ) -> None:
+        async def stream_task_status(websocket: WebSocket, task_id: str) -> None:
             """
             Stream task status updates via WebSocket.
 
@@ -949,7 +954,9 @@ class CeleryFastAPIBridge:
                     local_worker = _find_local_worker()
                 # When a specific worker is requested, verify it's online via inspection.
                 # In environments without active workers, this will be False.
-                inspector = self.celery_app.control.inspect(destination=[local_worker] if local_worker else None)
+                inspector = self.celery_app.control.inspect(
+                    destination=[local_worker] if local_worker else None
+                )
                 ping_response = inspector.ping() or {}
                 worker_online = local_worker in ping_response if local_worker else False
 

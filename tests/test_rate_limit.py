@@ -44,4 +44,6 @@ def test_ratelimit_rejects_over_limit() -> None:
     # Third request should be rate limited
     response = client.post("/test_ratelimit/add", json={"x": 1, "y": 2})
     assert response.status_code == 429
-    assert "limit exceeded" in response.text.lower() or "too many" in response.text.lower()
+    assert (
+        "limit exceeded" in response.text.lower() or "too many" in response.text.lower()
+    )

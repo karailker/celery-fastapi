@@ -117,37 +117,41 @@ class TestGenericTaskPayload:
     def test_empty_task_name_rejected(self) -> None:
         """Test empty task name raises ValueError."""
         import pydantic
+
         try:
             GenericTaskPayload(task_name="", queue="celery")
-            assert False, "should have raised"
+            raise AssertionError("should have raised")
         except pydantic.ValidationError as e:
             assert "non-empty" in str(e)
 
     def test_control_chars_rejected(self) -> None:
         """Test control characters in task_name raise ValueError."""
         import pydantic
+
         try:
             GenericTaskPayload(task_name="task\x00name", queue="celery")
-            assert False, "should have raised"
+            raise AssertionError("should have raised")
         except pydantic.ValidationError as e:
             assert "control characters" in str(e)
 
     def test_special_chars_rejected(self) -> None:
         """Test special characters in task_name raise ValueError."""
         import pydantic
+
         try:
             GenericTaskPayload(task_name="task/name", queue="celery")
-            assert False, "should have raised"
+            raise AssertionError("should have raised")
         except pydantic.ValidationError as e:
             assert "alphanumeric" in str(e)
 
     def test_task_name_length_limit(self) -> None:
         """Test task_name exceeding 255 chars raises ValueError."""
         import pydantic
+
         long_name = "a" * 256
         try:
             GenericTaskPayload(task_name=long_name, queue="celery")
-            assert False, "should have raised"
+            raise AssertionError("should have raised")
         except pydantic.ValidationError as e:
             assert "255" in str(e)
 

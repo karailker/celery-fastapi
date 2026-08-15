@@ -1,7 +1,5 @@
 """Tests for batch task execution endpoints."""
 
-from typing import Any
-
 from fastapi.testclient import TestClient
 
 from celery_fastapi import create_app
@@ -17,9 +15,7 @@ def test_batch_add_tasks() -> None:
         broker="memory://",
         backend="cache+memory://",
     )
-    celery_app.conf.update(
-        task_always_eager=True, task_eager_propagates=True
-    )
+    celery_app.conf.update(task_always_eager=True, task_eager_propagates=True)
 
     @celery_app.task(name="test_batch.add")
     def add(x: int, y: int) -> int:
@@ -36,10 +32,16 @@ def test_batch_add_tasks() -> None:
     batch_data = [[1, 2], [3, 4], [5, 6]]
     response = client.post(
         "/tasks/batch",
-        json={"tasks": [{"task_name": "test_batch.add", "args": [x, y]} for x, y in batch_data]},
+        json={
+            "tasks": [
+                {"task_name": "test_batch.add", "args": [x, y]} for x, y in batch_data
+            ]
+        },
     )
 
-    assert response.status_code == 200, f"Expected 200, got {response.status_code}: {response.text}"
+    assert (
+        response.status_code == 200
+    ), f"Expected 200, got {response.status_code}: {response.text}"
     data = response.json()
     assert "group_id" in data
     assert len(data["task_ids"]) == len(batch_data)
@@ -69,7 +71,12 @@ def test_batch_revoke_response() -> None:
     batch_data = [[1, 2], [3, 4]]
     response = client.post(
         "/tasks/batch",
-        json={"tasks": [{"task_name": "test_batch_revoke.add", "args": [x, y]} for x, y in batch_data]},
+        json={
+            "tasks": [
+                {"task_name": "test_batch_revoke.add", "args": [x, y]}
+                for x, y in batch_data
+            ]
+        },
     )
 
     if response.status_code == 200:
@@ -78,7 +85,9 @@ def test_batch_revoke_response() -> None:
         if task_ids:
             # Batch revoke endpoint exists
             revoke_response = client.post(
-                f"/tasks/batch/revoke",
-                json={"task_ids": task_ids[:1]},  # Revoke one to avoid eager repeat execution
+                "/tasks/batch/revoke",
+                json={
+                    "task_ids": task_ids[:1]
+                },  # Revoke one to avoid eager repeat execution
             )
             assert revoke_response.status_code == 200

@@ -85,6 +85,7 @@ def create_app(
     prefix: str = "",
     include_status_endpoints: bool = True,
     fastapi_kwargs: dict[str, Any] | None = None,
+    rate_limit: int | None = None,
 ) -> FastAPI:
     """
     Create a FastAPI application with Celery task endpoints.
@@ -143,6 +144,7 @@ def create_app(
         fastapi_app=fastapi_app,
         prefix=prefix,
         include_status_endpoints=include_status_endpoints,
+        rate_limit=rate_limit,
     )
 
     # Register all routes

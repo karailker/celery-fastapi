@@ -1,14 +1,17 @@
 """Core functionality for Celery FastAPI."""
 
 import inspect
+import time
+from collections import defaultdict, deque
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any, get_type_hints
 
 from celery import Celery
 from celery.result import AsyncResult
-from fastapi import FastAPI, HTTPException, Query
-from pydantic import BaseModel, Field, create_model
+import asyncio
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel, Field, create_model, field_validator
 
 # Celery execution options - shared fields for all task payloads
 CELERY_OPTIONS_FIELDS: dict[str, Any] = {
@@ -142,6 +145,18 @@ class GenericTaskPayload(BaseModel):
         }
     }
 
+    @field_validator("task_name", "queue")
+    @classmethod
+    def _validate_names(cls, value: str) -> str:
+        # Trust boundary: reject control chars / injection attempts.
+        if not value or not value.strip():
+            raise ValueError("must be a non-empty string")
+        if any(ord(c) < 0x20 for c in value):
+            raise ValueError("control characters are not allowed")
+        if not all(c.isalnum() or c in "._-" for c in value):
+            raise ValueError("only alphanumeric, '.', '_', '-' allowed")
+        return value
+
 
 def _python_type_to_json_type(py_type: type) -> str:
     """Convert Python type to JSON schema type string."""
@@ -271,6 +286,37 @@ class TaskRevokePayload(BaseModel):
     )
 
 
+class BatchTaskItem(BaseModel):
+    """A single task to execute as part of a batch."""
+
+    task_name: str = Field(description="Full task name (e.g., 'myapp.tasks.add')")
+    queue: str | None = Field(default=None, description="Queue override")
+    args: list[Any] = Field(
+        default_factory=list, description="Positional arguments for the task"
+    )
+    kwargs: dict[str, Any] = Field(
+        default_factory=dict, description="Keyword arguments for the task"
+    )
+    countdown: float | None = Field(default=None, description="Seconds to wait")
+
+
+class BatchTaskRequest(BaseModel):
+    """Payload for batch task execution."""
+
+    tasks: list[BatchTaskItem] = Field(
+        description="List of tasks to execute as a group"
+    )
+
+
+class BatchTaskResponse(BaseModel):
+    """Response model for batch task submission."""
+
+    group_id: str = Field(description="Group ID for the submitted batch")
+    task_ids: list[str] = Field(description="Individual task IDs in the group")
+    task_count: int = Field(description="Number of tasks submitted")
+    status: str = Field(default="PENDING", description="Group status")
+
+
 class HealthCheckResponse(BaseModel):
     """Response model for health check endpoint."""
 
@@ -293,6 +339,40 @@ class PingResponse(BaseModel):
     response: dict[str, str] | None = Field(
         default=None, description="Ping response from the worker"
     )
+
+
+class RateLimiter:
+    """Simple in-memory sliding-window rate limiter.
+
+    Tracks request counts per client key (defaults to client IP) within a
+    fixed time window. When the limit is exceeded, `check` raises HTTP 429.
+
+    ponytail: in-memory, single-process. Replace with Redis-backed limiter
+    (e.g., ``limits`` package) when running multiple uvicorn workers.
+    """
+
+    def __init__(self, limit: int, window_seconds: int = 60) -> None:
+        self.limit = limit
+        self.window_seconds = window_seconds
+        self._hits: dict[str, deque[float]] = defaultdict(deque)
+
+    def check(self, key: str) -> None:
+        """Record a hit for ``key``; raise HTTPException(429) if over limit."""
+        now = time.monotonic()
+        window = self._hits[key]
+        cutoff = now - self.window_seconds
+
+        # Drop hits outside the window
+        while window and window[0] < cutoff:
+            window.popleft()
+
+        if len(window) >= self.limit:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Rate limit exceeded: {self.limit} requests per {self.window_seconds}s",
+            )
+
+        window.append(now)
 
 
 class CeleryFastAPIBridge:
@@ -327,6 +407,7 @@ class CeleryFastAPIBridge:
         prefix: str = "",
         include_status_endpoints: bool = True,
         task_filter: Callable[[str], bool] | None = None,
+        rate_limit: int | None = None,
     ) -> None:
         """
         Initialize the Celery FastAPI Bridge.
@@ -339,12 +420,15 @@ class CeleryFastAPIBridge:
             include_status_endpoints: Whether to include task status and listing endpoints.
             task_filter: Optional callable to filter which tasks to expose.
                         Takes task name, returns True to include, False to exclude.
+            rate_limit: Optional maximum number of requests per minute per client.
+                        If set, requests exceeding the limit get HTTP 429.
         """
         self.celery_app = celery_app
         self.fastapi_app = fastapi_app or FastAPI()
         self.prefix = prefix.rstrip("/")
         self.include_status_endpoints = include_status_endpoints
         self.task_filter = task_filter or (lambda name: not name.startswith("celery."))
+        self.rate_limiter = RateLimiter(rate_limit) if rate_limit else None
         self._registered = False
 
         # Store the registered task names from THIS app only
@@ -404,6 +488,7 @@ class CeleryFastAPIBridge:
 
         # Create the endpoint handler
         async def run_task(
+            request: Request,
             payload: PayloadModel,  # type: ignore[valid-type]
             task_name_override: str | None = Query(
                 default=None,
@@ -417,6 +502,11 @@ class CeleryFastAPIBridge:
             ),
         ) -> TaskResponse:
             """Execute a Celery task asynchronously."""
+            # Rate limit check (per client IP)
+            if self.rate_limiter is not None:
+                client_ip = request.client.host if request.client else "unknown"
+                self.rate_limiter.check(client_ip)
+
             # Determine actual task name and queue
             actual_task_name = task_name_override or task_name
             actual_queue = (
@@ -580,6 +670,41 @@ class CeleryFastAPIBridge:
                 )
 
             return result.result
+
+        @self.fastapi_app.websocket(f"{self.prefix}/tasks/{{task_id}}/ws")
+        async def stream_task_status(
+            websocket: WebSocket, task_id: str
+        ) -> None:
+            """
+            Stream task status updates via WebSocket.
+
+            Polls the task state every 0.5s and sends JSON frames until the
+            task reaches a terminal state (SUCCESS/FAILURE/REVOKED), then closes.
+
+            ponytail: polling-based. For high-throughput streams, replace with
+            Celery events (celery_app.events.Receiver) or Redis pub/sub.
+            """
+            await websocket.accept()
+            result = AsyncResult(task_id, app=self.celery_app)
+            try:
+                while True:
+                    state = result.state
+                    frame: dict[str, Any] = {
+                        "task_id": task_id,
+                        "state": state,
+                        "ready": result.ready(),
+                    }
+                    if result.ready():
+                        if result.failed():
+                            frame["error"] = str(result.traceback or "task failed")
+                        else:
+                            frame["result"] = result.result
+                        await websocket.send_json(frame)
+                        break
+                    await websocket.send_json(frame)
+                    await asyncio.sleep(0.5)
+            except WebSocketDisconnect:
+                pass
 
         @self.fastapi_app.get(
             f"{self.prefix}/tasks",
@@ -791,11 +916,20 @@ class CeleryFastAPIBridge:
             tags=["health"],
             summary="Health check",
         )
-        async def health_check() -> HealthCheckResponse:
+        async def health_check(
+            worker: str | None = Query(
+                default=None,
+                description=(
+                    "Explicit worker hostname to check (e.g., 'celery@worker1'). "
+                    "If provided, bypasses local worker discovery."
+                ),
+            ),
+        ) -> HealthCheckResponse:
             """
-            Check the health of the local Celery worker.
+            Check the health of a Celery worker.
 
-            Automatically discovers the worker running on the same host by
+            If a `worker` query parameter is provided, checks that specific worker.
+            Otherwise, automatically discovers the worker running on the same host by
             matching the system hostname with active Celery worker hostnames.
 
             Returns:
@@ -806,10 +940,16 @@ class CeleryFastAPIBridge:
             - Load balancer health checks
             - Monitoring systems
             """
+            local_worker = worker  # Use explicit worker if provided
             try:
                 broker_connected = True
-                local_worker = _find_local_worker()
-                worker_online = local_worker is not None
+                if local_worker is None:
+                    local_worker = _find_local_worker()
+                # When a specific worker is requested, verify it's online via inspection.
+                # In environments without active workers, this will be False.
+                inspector = self.celery_app.control.inspect(destination=[local_worker] if local_worker else None)
+                ping_response = inspector.ping() or {}
+                worker_online = local_worker in ping_response if local_worker else False
 
             except Exception:  # noqa: BLE001
                 broker_connected = False
@@ -833,32 +973,43 @@ class CeleryFastAPIBridge:
             tags=["health"],
             summary="Ping worker",
         )
-        async def ping_worker() -> PingResponse:
+        async def ping_worker(
+            worker: str | None = Query(
+                default=None,
+                description=(
+                    "Explicit worker hostname to ping (e.g., 'celery@worker1'). "
+                    "If provided, bypasses local worker discovery."
+                ),
+            ),
+        ) -> PingResponse:
             """
-            Ping the local Celery worker.
+            Ping a Celery worker.
 
-            Automatically discovers the worker running on the same host by
-            matching the system hostname with active Celery worker hostnames.
+            If a `worker` query parameter is provided, pings that specific worker.
+            Otherwise, automatically discovers the local Celery worker by matching
+            the system hostname with active Celery worker hostnames.
 
             Returns:
-                Ping response from the local worker.
+                Ping response from the discovered or specified worker.
 
             This endpoint is useful for:
-            - Checking local worker responsiveness
+            - Checking specific worker responsiveness
             - Diagnosing connection issues
             - Verifying worker health in containerized deployments
             """
-            local_worker = _find_local_worker()
+            local_worker = worker  # Use explicit worker if provided
+            if not local_worker:
+                local_worker = _find_local_worker()
 
             if not local_worker:
-                # No local worker found
+                # No worker found or specified
                 return PingResponse(
                     worker_hostname=None,
                     online=False,
                     response=None,
                 )
 
-            # Ping the specific local worker
+            # Ping the specific worker
             inspector = self.celery_app.control.inspect(destination=[local_worker])
             ping_response = inspector.ping() or {}
 
@@ -941,6 +1092,79 @@ class CeleryFastAPIBridge:
 
             result = self.celery_app.send_task(payload.task_name, **send_options)
             return TaskResponse(task_id=result.id, status="PENDING")
+
+        @self.fastapi_app.post(
+            f"{self.prefix}/tasks/batch",
+            response_model=BatchTaskResponse,
+            tags=["tasks"],
+            summary="Execute multiple tasks in a group",
+        )
+        async def batch_execute_tasks(
+            payload: BatchTaskRequest,
+        ) -> BatchTaskResponse:
+            """
+            Execute multiple Celery tasks as a single group.
+
+            The tasks are submitted as a Celery group, enabling coordinated
+            execution and result collection.
+
+            Returns:
+                Group ID, individual task IDs, and count of submitted tasks.
+            """
+            from celery import group
+
+            # Validate: at least one task required
+            if not payload.tasks:
+                raise HTTPException(status_code=422, detail="No tasks provided")
+
+            # Build Celery signatures for each task
+            signatures = []
+            for item in payload.tasks:
+                if not item.task_name:
+                    raise HTTPException(
+                        status_code=422, detail="task_name is required for each task"
+                    )
+                sig = self.celery_app.signature(
+                    item.task_name,
+                    args=item.args,
+                    kwargs=item.kwargs,
+                    queue=item.queue,
+                )
+                signatures.append(sig)
+
+            # Submit the group
+            job = group(*signatures)
+            result = job.apply_async()
+
+            task_ids = [r.id for r in result.children or []]
+
+            return BatchTaskResponse(
+                group_id=result.id,
+                task_ids=task_ids,
+                task_count=len(payload.tasks),
+                status="PENDING",
+            )
+
+        @self.fastapi_app.post(
+            f"{self.prefix}/tasks/batch/revoke",
+            summary="Revoke multiple tasks",
+        )
+        async def batch_revoke_tasks(
+            payload: dict[str, list[str]],
+        ) -> dict[str, Any]:
+            """
+            Revoke multiple tasks by their task IDs.
+
+            Task IDs should be provided in the `task_ids` field.
+            """
+            task_ids = payload.get("task_ids", [])
+            if not task_ids:
+                raise HTTPException(status_code=422, detail="task_ids is required")
+
+            for task_id in task_ids:
+                self.celery_app.control.revoke(task_id)
+
+            return {"status": "revoked", "task_ids": task_ids, "count": len(task_ids)}
 
     def get_registered_routes(self) -> list[dict[str, str]]:
         """

@@ -24,6 +24,9 @@ Automatic REST API generation for Celery tasks with FastAPI. This package seamle
 - 🔒 **Production ready** - Full uvicorn/gunicorn support with SSL, workers, and all options
 - ⚡ **Full Celery options** - All task options (countdown, eta, priority, etc.)
 - 🔌 **Pool support** - Compatible with eventlet, gevent, prefork, and solo pools
+- 🧮 **Batch execution** - Submit groups of tasks in a single request via `/tasks/batch`
+- 🛡️ **Input validation** - Pydantic-driven validation on task_name/queue at trust boundary
+- 🔌 **WebSocket streaming** - Live task status updates via `/tasks/{task_id}/ws`
 
 ## Requirements
 

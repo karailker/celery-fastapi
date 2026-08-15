@@ -114,6 +114,47 @@ class TestGenericTaskPayload:
         )
         assert payload.kwargs == {"key": "value"}
 
+    def test_empty_task_name_rejected(self) -> None:
+        """Test empty task name raises ValueError."""
+        import pydantic
+
+        try:
+            GenericTaskPayload(task_name="", queue="celery")
+            raise AssertionError("should have raised")
+        except pydantic.ValidationError as e:
+            assert "non-empty" in str(e)
+
+    def test_control_chars_rejected(self) -> None:
+        """Test control characters in task_name raise ValueError."""
+        import pydantic
+
+        try:
+            GenericTaskPayload(task_name="task\x00name", queue="celery")
+            raise AssertionError("should have raised")
+        except pydantic.ValidationError as e:
+            assert "control characters" in str(e)
+
+    def test_special_chars_rejected(self) -> None:
+        """Test special characters in task_name raise ValueError."""
+        import pydantic
+
+        try:
+            GenericTaskPayload(task_name="task/name", queue="celery")
+            raise AssertionError("should have raised")
+        except pydantic.ValidationError as e:
+            assert "alphanumeric" in str(e)
+
+    def test_task_name_length_limit(self) -> None:
+        """Test task_name exceeding 255 chars raises ValueError."""
+        import pydantic
+
+        long_name = "a" * 256
+        try:
+            GenericTaskPayload(task_name=long_name, queue="celery")
+            raise AssertionError("should have raised")
+        except pydantic.ValidationError as e:
+            assert "255" in str(e)
+
 
 class TestTaskEndpoints:
     """Tests for task execution endpoints."""
@@ -195,3 +236,31 @@ class TestHealthEndpoints:
         assert data["worker_hostname"] is None or isinstance(
             data["worker_hostname"], str
         )
+
+    def test_health_check_with_worker_query_param(self, client: TestClient) -> None:
+        """Test health check with explicit worker query parameter."""
+        response = client.get("/healthz?worker=celery@worker1")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["worker_hostname"] == "celery@worker1"
+        assert "status" in data
+        assert "broker_connected" in data
+        assert "worker_online" in data
+
+    def test_ping_with_worker_query_param(self, client: TestClient) -> None:
+        """Test ping with explicit worker query parameter."""
+        response = client.get("/ping?worker=celery@worker1")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["worker_hostname"] == "celery@worker1"
+        assert isinstance(data["online"], bool)
+
+    def test_health_check_with_unknown_worker_query_param(
+        self, client: TestClient
+    ) -> None:
+        """Test health check with unknown worker query parameter."""
+        response = client.get("/healthz?worker=unknown@worker")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["worker_hostname"] == "unknown@worker"
+        assert data["worker_online"] is False

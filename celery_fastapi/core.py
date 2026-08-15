@@ -11,7 +11,7 @@ from celery import Celery
 from celery.result import AsyncResult
 import asyncio
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel, Field, create_model, field_validator
+from pydantic import BaseModel, Field, ValidationInfo, create_model, field_validator
 
 # Celery execution options - shared fields for all task payloads
 CELERY_OPTIONS_FIELDS: dict[str, Any] = {
@@ -147,7 +147,7 @@ class GenericTaskPayload(BaseModel):
 
     @field_validator("task_name", "queue")
     @classmethod
-    def _validate_names(cls, value: str) -> str:
+    def _validate_names(cls, value: str, info: ValidationInfo) -> str:
         # Trust boundary: reject control chars / injection attempts.
         if not value or not value.strip():
             raise ValueError("must be a non-empty string")
@@ -155,6 +155,8 @@ class GenericTaskPayload(BaseModel):
             raise ValueError("control characters are not allowed")
         if not all(c.isalnum() or c in "._-" for c in value):
             raise ValueError("only alphanumeric, '.', '_', '-' allowed")
+        if info.field_name == "task_name" and len(value) > 255:
+            raise ValueError("task_name exceeds 255 character limit")
         return value
 
 

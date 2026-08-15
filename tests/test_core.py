@@ -141,6 +141,16 @@ class TestGenericTaskPayload:
         except pydantic.ValidationError as e:
             assert "alphanumeric" in str(e)
 
+    def test_task_name_length_limit(self) -> None:
+        """Test task_name exceeding 255 chars raises ValueError."""
+        import pydantic
+        long_name = "a" * 256
+        try:
+            GenericTaskPayload(task_name=long_name, queue="celery")
+            assert False, "should have raised"
+        except pydantic.ValidationError as e:
+            assert "255" in str(e)
+
 
 class TestTaskEndpoints:
     """Tests for task execution endpoints."""

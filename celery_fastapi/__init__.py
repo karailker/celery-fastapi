@@ -14,7 +14,7 @@ from celery_fastapi.core import (
     TaskStatusResponse,
 )
 
-__version__ = "0.1.3"
+__version__ = "0.0.0"
 __all__ = [
     "CeleryFastAPIBridge",
     "create_app",

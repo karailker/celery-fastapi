@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "celery-fastapi"
-# version is set dynamically by poetry-dynamic-versioning from git tags
+version = "0.0.0" # placeholder; overridden by poetry-dynamic-versioning at build time
 description = "Automatic REST API generation for Celery tasks with FastAPI"
 authors = ["ilkerkara <ilkerkara@outlook.com.tr>"]
 license = "MIT"
@@ -107,8 +107,11 @@ rich = ">=13.0.0"
 celery-fastapi = "celery_fastapi.cli:app"
 
 [build-system]
-requires = ["poetry-core>=1.0.0", "poetry-dynamic-versioning>=1.0.0"]
-build-backend = "poetry.core.masonry.api"
+requires = ["poetry-core>=1.0.0", "poetry-dynamic-versioning>=1.0.0,<2.0.0"]
+build-backend = "poetry_dynamic_versioning.backend"
+
+[tool.poetry.requires-plugins]
+poetry-dynamic-versioning = { version = ">=1.0.0,<2.0.0", extras = ["plugin"] }
 
 [tool.poetry-dynamic-versioning]
 enable = true

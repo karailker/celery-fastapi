@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
-from enum import Enum
+from enum import StrEnum
 from typing import Annotated, Any
 
 try:
@@ -19,7 +19,7 @@ except ImportError:
     sys.exit(1)
 
 
-class LogLevel(str, Enum):
+class LogLevel(StrEnum):
     """Log level options."""
 
     critical = "critical"
@@ -30,7 +30,7 @@ class LogLevel(str, Enum):
     trace = "trace"
 
 
-class LoopType(str, Enum):
+class LoopType(StrEnum):
     """Event loop implementation options."""
 
     auto = "auto"
@@ -38,7 +38,7 @@ class LoopType(str, Enum):
     uvloop = "uvloop"
 
 
-class HttpProtocol(str, Enum):
+class HttpProtocol(StrEnum):
     """HTTP protocol implementation options."""
 
     auto = "auto"
@@ -46,7 +46,7 @@ class HttpProtocol(str, Enum):
     httptools = "httptools"
 
 
-class WsProtocol(str, Enum):
+class WsProtocol(StrEnum):
     """WebSocket protocol implementation options."""
 
     auto = "auto"
@@ -55,7 +55,7 @@ class WsProtocol(str, Enum):
     wsproto = "wsproto"
 
 
-class InterfaceType(str, Enum):
+class InterfaceType(StrEnum):
     """ASGI interface version."""
 
     auto = "auto"

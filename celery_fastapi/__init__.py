@@ -7,8 +7,10 @@ automatically generating REST endpoints for all registered Celery tasks.
 
 from celery_fastapi.app import create_app, load_celery_app
 from celery_fastapi.core import (
+    BaseRateLimitStorage,
     CeleryFastAPIBridge,
     GenericTaskPayload,
+    InMemoryRateLimitStorage,
     TaskResponse,
     TaskRevokePayload,
     TaskStatusResponse,
@@ -16,12 +18,14 @@ from celery_fastapi.core import (
 
 __version__ = "0.0.0"
 __all__ = [
+    "BaseRateLimitStorage",
     "CeleryFastAPIBridge",
     "create_app",
-    "load_celery_app",
     "GenericTaskPayload",
+    "InMemoryRateLimitStorage",
+    "load_celery_app",
     "TaskResponse",
-    "TaskStatusResponse",
     "TaskRevokePayload",
+    "TaskStatusResponse",
     "__version__",
 ]

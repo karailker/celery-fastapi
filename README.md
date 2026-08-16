@@ -3,36 +3,38 @@
 [![CI](https://github.com/karailker/celery-fastapi/actions/workflows/ci.yml/badge.svg)](https://github.com/karailker/celery-fastapi/actions/workflows/ci.yml)
 [![PyPI version](https://badge.fury.io/py/celery-fastapi.svg)](https://badge.fury.io/py/celery-fastapi)
 [![Python Version](https://img.shields.io/pypi/pyversions/celery-fastapi.svg)](https://pypi.org/project/celery-fastapi/)
-[![PyPI Downloads](https://static.pepy.tech/personalized-badge/celery-fastapi?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/celery-fastapi)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-
-![GitHub Repo stars](https://img.shields.io/github/stars/karailker/celery-fastapi)
-<!-- ![GitHub forks](https://img.shields.io/github/forks/karailker/celery-fastapi) -->
+[![GitHub Repo stars](https://img.shields.io/github/stars/karailker/celery-fastapi)](https://github.com/karailker/celery-fastapi/stargazers)
 
 Automatic REST API generation for Celery tasks with FastAPI. This package seamlessly bridges Celery and FastAPI, automatically creating REST endpoints for all your registered Celery tasks.
 
 ## Features
 
-- 🚀 **Automatic endpoint generation** - REST APIs created automatically for all Celery tasks
-- 🔧 **Zero configuration** - Works out of the box with sensible defaults
-- 📊 **Task monitoring** - Built-in endpoints for task status, revocation, and worker info
-- 🎯 **App-scoped operations** - Only manages tasks from your specific Celery app, not the entire cluster
-- 🖥️ **CLI support** - Run as a standalone server from command line
-- 📦 **Modular design** - Use as a library or standalone application
-- 🔄 **Queue-aware routing** - Respects Celery queue assignments
-- 📝 **OpenAPI documentation** - Full Swagger/ReDoc support
-- 🔒 **Production ready** - Full uvicorn/gunicorn support with SSL, workers, and all options
-- ⚡ **Full Celery options** - All task options (countdown, eta, priority, etc.)
-- 🔌 **Pool support** - Compatible with eventlet, gevent, prefork, and solo pools
-- 🧮 **Batch execution** - Submit groups of tasks in a single request via `/tasks/batch`
-- 🛡️ **Input validation** - Pydantic-driven validation on task_name/queue at trust boundary
-- 🔌 **WebSocket streaming** - Live task status updates via `/tasks/{task_id}/ws`
+- 🚀 **Automatic endpoint generation** — REST APIs created automatically for all Celery tasks
+- 🔧 **Zero configuration** — Works out of the box with sensible defaults
+- 📊 **Task monitoring** — Built-in endpoints for task status, revocation, and worker info
+- 🎯 **App-scoped operations** — Only manages tasks from your specific Celery app, not the entire cluster
+- 🖥️ **CLI support** — Run as a standalone server from command line
+- 📦 **Modular design** — Use as a library or standalone application
+- 🔄 **Queue-aware routing** — Respects Celery queue assignments
+- 📝 **OpenAPI documentation** — Full Swagger/ReDoc support
+- ⚡ **Full Celery options** — All task options (countdown, eta, priority, etc.)
+- 🧮 **Batch execution** — Submit groups of tasks in a single request via `/tasks/batch`
+- 🔗 **Workflow primitives** — Chain and chord orchestration via `/tasks/chain` and `/tasks/chord`
+- 🛡️ **Input validation** — Pydantic-driven validation on `task_name`/`queue` at trust boundary
+- 📦 **Pydantic task params** — Tasks annotated with `BaseModel` subclasses get first-class payload models and OpenAPI schemas
+- 🪝 **Bridge hooks** — `pre_hooks`/`post_hooks` run around task dispatch (auth, audit, notify)
+- 🗺️ **Discovery & mapping** — Hide tasks with `exclude` and rename public names with `name_mapping`
+- 🔀 **Custom error mapping** — Map exception types to HTTP status codes via `error_mapping`
+- 🧩 **Middleware & dependencies** — Inject FastAPI middleware and `Depends` providers
+- 💾 **Pluggable rate limiting** — In-memory by default; bring your own store via `BaseRateLimitStorage`
+- 🔌 **WebSocket streaming** — Live task status updates via `/tasks/{task_id}/ws`
 
 ## Requirements
 
 - Python 3.11+
 - FastAPI 0.100.0+
-- Celery 5.3.0+
+- Celery 5.3.0+ (tested up to 5.6.3)
 
 ## Installation
 
@@ -55,10 +57,6 @@ pip install celery-fastapi[redis]
 # With RabbitMQ broker
 pip install celery-fastapi[rabbitmq]
 
-# With eventlet/gevent concurrency
-pip install celery-fastapi[eventlet]
-pip install celery-fastapi[gevent]
-
 # All extras (recommended for production)
 pip install celery-fastapi[all]
 ```
@@ -67,7 +65,6 @@ Or with Poetry:
 
 ```bash
 poetry add celery-fastapi
-poetry add celery-fastapi --extras cli  # for CLI support
 ```
 
 ## Quick Start
@@ -78,16 +75,11 @@ poetry add celery-fastapi --extras cli  # for CLI support
 from celery import Celery
 from celery_fastapi import CeleryFastAPIBridge, create_app
 
-# Your existing Celery app
 celery_app = Celery('tasks', broker='redis://localhost:6379/0')
 
 @celery_app.task
 def add(x, y):
     return x + y
-
-@celery_app.task
-def multiply(x, y):
-    return x * y
 
 # Option 1: Using create_app factory
 app = create_app(celery_app)
@@ -109,293 +101,213 @@ uvicorn myapp:app --reload
 ### Using the CLI
 
 ```bash
-# Start the server (development)
 celery-fastapi serve examples.celery_app:celery_app --port 8000 --reload
-
-# Production with multiple workers
 celery-fastapi serve examples.celery_app:celery_app -w 4 --host 0.0.0.0
-
-# With custom worker hostname (for health checks)
-export CELERY_WORKER_HOSTNAME="celery@worker1"
-celery-fastapi serve examples.celery_app:celery_app --port 8000
-
-# With SSL
-celery-fastapi serve examples.celery_app:celery_app --ssl-keyfile key.pem --ssl-certfile cert.pem
-
-# Using gunicorn (production)
-celery-fastapi serve-gunicorn examples.celery_app:celery_app -w 4 -k uvicorn.workers.UvicornWorker
-
-# List available routes
 celery-fastapi routes examples.celery_app:celery_app
-
-# List registered tasks
 celery-fastapi tasks examples.celery_app:celery_app
-
-# Show active workers
 celery-fastapi workers examples.celery_app:celery_app
 ```
 
 ## API Endpoints
 
-Once running, your Celery tasks are available as REST endpoints:
+All endpoints are prefixed with the configured `prefix` (empty by default).
 
 ### Task Execution
 
-```bash
-# Execute a task with basic args
-POST /{task_name_with_slashes}
-Content-Type: application/json
+`POST /{task_name_with_slashes}` — Execute a task.
 
+```json
 {
-    "args": [1, 2],
-    "kwargs": {}
-}
-
-# Execute with advanced Celery options
-POST /myapp/process_data
-Content-Type: application/json
-
-{
-    "args": ["data.csv"],
-    "kwargs": {"output_format": "json"},
-    "countdown": 60,
-    "priority": 5,
-    "queue": "high_priority",
-    "time_limit": 300,
-    "soft_time_limit": 280
-}
-
-# Response
-{
-    "task_id": "abc123-def456-...",
-    "status": "PENDING"
+  "args": [1, 2],
+  "kwargs": {},
+  "countdown": 60,
+  "priority": 5,
+  "queue": "high_priority"
 }
 ```
+
+```json
+{
+  "task_id": "abc123-def456-...",
+  "status": "PENDING"
+}
+```
+
+`POST /trigger` — Trigger any task by name (`queue` required here).
+
+```json
+{
+  "task_name": "myapp.add",
+  "queue": "celery",
+  "args": [1, 2]
+}
+```
+
+#### Pydantic task parameters
+
+When a task is annotated with a `pydantic.BaseModel` subclass, the generated
+payload model uses that model directly, so nested schemas appear in OpenAPI:
+
+```python
+class Item(BaseModel):
+    name: str
+    qty: int = 1
+
+@celery_app.task(name="myapp.process")
+def process(payload: Item) -> dict:
+    return payload.model_dump()
+```
+
+```json
+{"payload": {"name": "widget", "qty": 3}}
+```
+
+### Workflow Primitives
+
+`POST /tasks/chain` — Run tasks sequentially, passing results forward.
+
+```json
+{
+  "tasks": [
+    {"task_name": "myapp.add", "args": [1, 2]},
+    {"task_name": "myapp.add", "args": [3, 4]}
+  ]
+}
+```
+
+`POST /tasks/chord` — Run a header group, then a callback once all complete.
+
+```json
+{
+  "header": [
+    {"task_name": "myapp.add", "args": [1, 2]},
+    {"task_name": "myapp.add", "args": [3, 4]}
+  ],
+  "callback": "myapp.greet"
+}
+```
+
+### Batch Execution
+
+`POST /tasks/batch` — Submit a group of tasks.
+
+`POST /tasks/batch/revoke` — Revoke tasks by list of IDs.
 
 ### Task Status
 
-```bash
-# Get task status
-GET /tasks/{task_id}
+- `GET /tasks/{task_id}` — Full task status (state, result, traceback, date_done).
+- `GET /tasks/{task_id}/result` — Task result only.
+- `GET /tasks` — List active, scheduled, reserved, revoked tasks (filtered to this app).
+- `DELETE /tasks/{task_id}` — Revoke a single task.
 
-# Response
-{
-    "task_id": "abc123-def456-...",
-    "state": "SUCCESS",
-    "result": 3,
-    "traceback": null,
-    "date_done": "2024-01-15T10:30:00Z"
-}
-```
+### Discovery & Management
 
-### Task Management
+- `GET /available-tasks` — List tasks registered in THIS app (respects `name_mapping`/`exclude`).
+- `GET /workers` — List active workers, filtered to this app's tasks (includes `active_queues`).
 
-```bash
-# Revoke a task
-POST /tasks/{task_id}/revoke
-Content-Type: application/json
+### Health Check
 
-{
-    "terminate": true,
-    "signal": "SIGTERM"
-}
+- `GET /healthz` — Health check for local Celery worker.
+- `GET /ping` — Ping local Celery worker.
 
-# Get task result only
-GET /tasks/{task_id}/result
+### WebSocket Streaming
 
-# List active workers (filtered to this app's tasks)
-GET /workers
-
-# List available tasks in THIS app
-GET /available-tasks
-
-# Response
-{
-    "app_name": "my_tasks",
-    "task_count": 4,
-    "tasks": [
-        {"name": "my_tasks.add", "queue": "default", ...},
-        {"name": "my_tasks.multiply", "queue": "default", ...}
-    ]
-}
-
-# List queues
-GET /queues
-
-# Purge tasks from a queue
-POST /purge
-```
-
-### Health Check and Monitoring
-
-```bash
-# Health check for local Celery worker
-GET /healthz
-
-# Response
-{
-    "status": "healthy",
-    "celery_app": "example_tasks",
-    "broker_connected": true,
-    "worker_hostname": "celery@worker1",
-    "worker_online": true
-}
-
-# Ping local Celery worker
-GET /ping
-
-# Response
-{
-    "worker_hostname": "celery@worker1",
-    "online": true,
-    "response": {"ok": "pong"}
-}
-```
-
-**Note:** Health and ping endpoints automatically discover the local worker using:
-1. `CELERY_WORKER_HOSTNAME` environment variable (recommended for custom hostnames)
-2. Hostname matching (when worker and API share the same hostname)
-3. Single worker fallback (when only one worker has this app's tasks)
-
-**For custom worker hostnames**, set the environment variable:
-```bash
-export CELERY_WORKER_HOSTNAME="celery@worker1"
-celery -A examples.celery_app worker --hostname worker1
-celery-fastapi serve examples.celery_app:celery_app --port 8000
-```
-
-### List All Tasks
-
-```bash
-# List active, scheduled, reserved, and revoked tasks (filtered to this app only)
-GET /tasks
-
-# Response
-{
-    "active": {...},
-    "scheduled": {...},
-    "reserved": {...},
-    "revoked": {...}
-}
-```
+`WS /tasks/{task_id}/ws` — Stream task status updates as JSON frames.
 
 ## Configuration
 
 ### CeleryFastAPIBridge Options
 
 ```python
+from celery_fastapi import (
+    CeleryFastAPIBridge,
+    BaseRateLimitStorage,
+)
+
 bridge = CeleryFastAPIBridge(
     celery_app=celery_app,
-    fastapi_app=fastapi_app,  # Optional, creates new if not provided
-    prefix="/api/v1",         # URL prefix for all endpoints
-    include_status_endpoints=True,  # Include /tasks endpoints
-    task_filter=lambda name: not name.startswith("internal."),  # Filter tasks
+    fastapi_app=fastapi_app,              # Optional
+    prefix="/api/v1",                     # URL prefix
+    include_status_endpoints=True,
+    task_filter=lambda name: not name.startswith("internal."),
+    rate_limit=100,                       # req/min per client
+    rate_limit_storage=None,              # BaseRateLimitStorage instance
+    exclude={"internal.secret"},          # Hide from API
+    name_mapping={"my.add": "public_add"},# Rename in listings
+    middleware=[my_http_middleware],
+    dependencies=[auth_provider],
+    pre_hooks=[audit_hook],               # receive payload
+    post_hooks=[notify_hook],             # receive response
+    error_mapping={ValueError: 422},
 )
 ```
 
-### create_app Options
+### Pluggable Rate Limit Storage
+
+Rate limiting is backed by `BaseRateLimitStorage` (abstract). Default is in-memory
+(single-process). For multi-worker, implement the ABC against a shared store:
 
 ```python
-app = create_app(
-    celery_app,  # Celery instance or module path string
-    title="My API",
-    description="Task API",
-    version="1.0.0",
-    prefix="/api",
-    include_status_endpoints=True,
-    fastapi_kwargs={"docs_url": "/swagger"},
+from celery_fastapi import BaseRateLimitStorage
+
+class RedisRateLimitStorage(BaseRateLimitStorage):
+    def __init__(self, client): ...
+    def prune(self, key, cutoff): ...
+    def count(self, key): ...
+    def add(self, key, now): ...
+
+bridge = CeleryFastAPIBridge(
+    celery_app,
+    rate_limit=100,
+    rate_limit_storage=RedisRateLimitStorage(redis_client),
 )
 ```
+
+`pip install celery-fastapi[redis]` provides the `redis` package for this.
 
 ## Integration with Existing FastAPI App
 
 ```python
 from fastapi import FastAPI
 from celery_fastapi import CeleryFastAPIBridge
-from myapp import celery_app
 
 app = FastAPI()
 
-# Your existing routes
 @app.get("/health")
 def health_check():
     return {"status": "healthy"}
 
-# Add Celery task endpoints under /celery prefix
-bridge = CeleryFastAPIBridge(
-    celery_app,
-    app,
-    prefix="/celery",
-)
+bridge = CeleryFastAPIBridge(celery_app, app, prefix="/celery")
 bridge.register_routes()
 ```
 
 ## CLI Reference
 
+```
+celery-fastapi serve        Start the server (uvicorn)
+celery-fastapi serve-gunicorn  Start with Gunicorn
+celery-fastapi routes       List all generated routes
+celery-fastapi tasks        List registered Celery tasks
+celery-fastapi workers      Show active workers
+```
+
 ```bash
-celery-fastapi --help
-
-Commands:
-  serve            Start the FastAPI server with uvicorn
-  serve-gunicorn   Start the FastAPI server with Gunicorn
-  routes           List all generated routes
-  tasks            List all registered Celery tasks
-  workers          Show active Celery workers
-
-# Serve options (uvicorn)
 celery-fastapi serve examples.celery_app:celery_app \
-    --host 0.0.0.0 \
-    --port 8000 \
-    --reload \
-    --workers 4 \
-    --prefix /api \
-    --log-level info \
-    --ssl-keyfile key.pem \
-    --ssl-certfile cert.pem \
-    --proxy-headers \
-    --forwarded-allow-ips '*'
-
-# Serve options (gunicorn)
-celery-fastapi serve-gunicorn examples.celery_app:celery_app \
-    --bind 0.0.0.0:8000 \
-    --workers 4 \
-    --worker-class uvicorn.workers.UvicornWorker \
-    --timeout 30 \
-    --daemon \
-    --pid /var/run/celery-fastapi.pid
+    --host 0.0.0.0 --port 8000 --reload --workers 4 \
+    --log-level info --ssl-keyfile key.pem --ssl-certfile cert.pem
 ```
 
 ## Development
 
 ```bash
-# Clone the repository
 git clone https://github.com/karailker/celery-fastapi.git
 cd celery-fastapi
-
-# Install dependencies
 poetry install --extras all
-
-# Run tests
 poetry run pytest
-
-# Run linting
 poetry run ruff check .
 poetry run mypy celery_fastapi
-
-# Format code
-poetry run ruff format .
 ```
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) file for details.
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+MIT License — see [LICENSE](LICENSE).

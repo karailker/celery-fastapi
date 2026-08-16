@@ -3,6 +3,7 @@
 import asyncio
 import inspect
 import time
+from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 from collections.abc import Callable
 from datetime import datetime
@@ -11,6 +12,7 @@ from typing import Any, get_type_hints
 from celery import Celery
 from celery.result import AsyncResult
 from fastapi import (
+    Depends,
     FastAPI,
     HTTPException,
     Query,
@@ -18,6 +20,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, ValidationInfo, create_model, field_validator
 
 # Celery execution options - shared fields for all task payloads
@@ -205,12 +208,40 @@ def _create_task_payload_model(
     field_definitions: dict[str, Any] = {}
     example_kwargs: dict[str, Any] = {}
 
+    # Pydantic task params: if a parameter is annotated with a BaseModel
+    # subclass, use that model as the field type directly so its nested
+    # schema mirrors into OpenAPI (and Celery native pydantic aware tasks
+    # receive the model instance).
     for param_name, param in sig.parameters.items():
         if param_name in ("self", "cls"):
             continue
 
         # Get type annotation
         param_type = type_hints.get(param_name, Any)
+
+        # Handle var-positional (*args) and var-keyword (**kwargs)
+        if param.kind == inspect.Parameter.VAR_POSITIONAL:
+            field_definitions[param_name] = (
+                list[param_type],
+                Field(default_factory=list, description=f"Positional arguments for {param_name}"),
+            )
+            example_kwargs[param_name] = [1, 2] # example
+            continue
+        elif param.kind == inspect.Parameter.VAR_KEYWORD:
+            field_definitions[param_name] = (
+                dict[str, param_type],
+                Field(default_factory=dict, description=f"Keyword arguments for {param_name}"),
+            )
+            example_kwargs[param_name] = {"k":"v"} # example
+            continue
+
+        # Pydantic task param: annotated BaseModel subclass is used as-is.
+        if isinstance(param_type, type) and issubclass(param_type, BaseModel):
+            field_definitions[param_name] = (
+                param_type,
+                Field(description=f"Parameter: {param_name} (model)"),
+            )
+            continue
 
         # Handle Optional types and defaults
         has_default = param.default is not inspect.Parameter.empty
@@ -350,38 +381,110 @@ class PingResponse(BaseModel):
     )
 
 
-class RateLimiter:
-    """Simple in-memory sliding-window rate limiter.
+class BaseRateLimitStorage(ABC):
+    """Abstract rate-limit hit storage.
 
-    Tracks request counts per client key (defaults to client IP) within a
-    fixed time window. When the limit is exceeded, `check` raises HTTP 429.
-
-    ponytail: in-memory, single-process. Replace with Redis-backed limiter
-    (e.g., ``limits`` package) when running multiple uvicorn workers.
+    Implementations keep per-client hit timestamps so the limiter can run
+    against in-process memory, Redis, or any other backing store.
     """
 
-    def __init__(self, limit: int, window_seconds: int = 60) -> None:
+    @abstractmethod
+    def prune(self, key: str, cutoff: float) -> None:
+        """Drop hits for ``key`` older than ``cutoff`` (monotonic clock)."""
+
+    @abstractmethod
+    def count(self, key: str) -> int:
+        """Return number of hits for ``key`` within the current window."""
+
+    @abstractmethod
+    def add(self, key: str, now: float) -> None:
+        """Record one hit for ``key`` at ``now``."""
+
+
+class InMemoryRateLimitStorage(BaseRateLimitStorage):
+    """Sliding-window hit storage held in-process.
+
+    ponytail: single-process default. For multi-worker deployments swap in a
+    shared store (e.g. Redis) via ``BaseRateLimitStorage``.
+    """
+
+    def __init__(self) -> None:
+        self._hits: dict[str, deque[float]] = defaultdict(deque)
+
+    def prune(self, key: str, cutoff: float) -> None:
+        window = self._hits[key]
+        while window and window[0] < cutoff:
+            window.popleft()
+
+    def count(self, key: str) -> int:
+        return len(self._hits[key])
+
+    def add(self, key: str, now: float) -> None:
+        self._hits[key].append(now)
+
+
+class RedisRateLimitStorage(BaseRateLimitStorage):
+    """Rate-limit storage backed by Redis (optional extra).
+
+    Requires the ``redis`` package (installed via ``pip install
+    celery-fastapi[redis]``). Uses a sorted set per client key; hits are
+    timestamps. Works across multiple uvicorn workers.
+    """
+
+    def __init__(self, client: Any, window_seconds: int = 60) -> None:
+        self._client = client
+        self._window_seconds = window_seconds
+        self._key_prefix = "celery_fastapi:ratelimit:"
+
+    def _zkey(self, key: str) -> str:
+        return f"{self._key_prefix}{key}"
+
+    def prune(self, key: str, cutoff: float) -> None:
+        zkey = self._zkey(key)
+        # cutoff is monotonic; Redis ZSET scores use wall clock, so we
+        # approximate by storing monotonic timestamps as scores.
+        self._client.zremrangebyscore(zkey, 0, cutoff)
+
+    def count(self, key: str) -> int:
+        zkey = self._zkey(key)
+        cutoff = time.monotonic() - self._window_seconds
+        self.prune(key, cutoff)
+        return int(self._client.zcard(zkey))
+
+    def add(self, key: str, now: float) -> None:
+        self._client.zadd(self._zkey(key), {f"{now}:{key}": now})
+
+
+class RateLimiter:
+    """Sliding-window rate limiter backed by a pluggable storage.
+
+    When the limit is exceeded, `check` raises HTTP 429. Storage defaults to
+    in-memory; pass a shared storage to coordinate across processes.
+    """
+
+    def __init__(
+        self,
+        limit: int,
+        window_seconds: int = 60,
+        storage: BaseRateLimitStorage | None = None,
+    ) -> None:
         self.limit = limit
         self.window_seconds = window_seconds
-        self._hits: dict[str, deque[float]] = defaultdict(deque)
+        self._storage = storage or InMemoryRateLimitStorage()
 
     def check(self, key: str) -> None:
         """Record a hit for ``key``; raise HTTPException(429) if over limit."""
         now = time.monotonic()
-        window = self._hits[key]
         cutoff = now - self.window_seconds
+        self._storage.prune(key, cutoff)
 
-        # Drop hits outside the window
-        while window and window[0] < cutoff:
-            window.popleft()
-
-        if len(window) >= self.limit:
+        if self._storage.count(key) >= self.limit:
             raise HTTPException(
                 status_code=429,
                 detail=f"Rate limit exceeded: {self.limit} requests per {self.window_seconds}s",
             )
 
-        window.append(now)
+        self._storage.add(key, now)
 
 
 class CeleryFastAPIBridge:
@@ -417,6 +520,14 @@ class CeleryFastAPIBridge:
         include_status_endpoints: bool = True,
         task_filter: Callable[[str], bool] | None = None,
         rate_limit: int | None = None,
+        rate_limit_storage: BaseRateLimitStorage | None = None,
+        middleware: list[Callable] | None = None,
+        dependencies: list[Depends] | None = None,
+        exclude: set[str] | None = None,
+        name_mapping: dict[str, str] | None = None,
+        pre_hooks: list[Callable] | None = None,
+        post_hooks: list[Callable] | None = None,
+        error_mapping: dict[type[Exception], int] | None = None,
     ) -> None:
         """
         Initialize the Celery FastAPI Bridge.
@@ -431,19 +542,37 @@ class CeleryFastAPIBridge:
                         Takes task name, returns True to include, False to exclude.
             rate_limit: Optional maximum number of requests per minute per client.
                         If set, requests exceeding the limit get HTTP 429.
+            rate_limit_storage: Pluggable storage for rate-limit hits (defaults to
+                        in-memory). Pass a shared store for multi-worker setups.
+            middleware: ASGI HTTP middleware callables to install on the FastAPI app.
+            dependencies: FastAPI ``Depends`` providers injected into task endpoints.
+            exclude: Task names to hide from the API.
+            name_mapping: Maps internal task names to public names shown in the API.
+            pre_hooks: Callables run before task dispatch; receive the payload.
+            post_hooks: Callables run after task dispatch; receive task id and result.
+            error_mapping: Maps exception types to HTTP status codes for error responses.
         """
         self.celery_app = celery_app
         self.fastapi_app = fastapi_app or FastAPI()
         self.prefix = prefix.rstrip("/")
         self.include_status_endpoints = include_status_endpoints
         self.task_filter = task_filter or (lambda name: not name.startswith("celery."))
-        self.rate_limiter = RateLimiter(rate_limit) if rate_limit else None
+        self.rate_limiter = (
+            RateLimiter(rate_limit, storage=rate_limit_storage) if rate_limit else None
+        )
+        self.middleware = middleware or []
+        self.dependencies = dependencies or []
+        self.exclude = exclude or set()
+        self.name_mapping = name_mapping or {}
+        self.pre_hooks = pre_hooks or []
+        self.post_hooks = post_hooks or []
+        self.error_mapping = error_mapping or {}
         self._registered = False
 
         # Store the registered task names from THIS app only
         self._app_task_names: set[str] = set()
         for name in self.celery_app.tasks:
-            if self.task_filter(name):
+            if name not in self.exclude and self.task_filter(name):
                 self._app_task_names.add(name)
 
     def register_routes(self) -> FastAPI:
@@ -455,6 +584,19 @@ class CeleryFastAPIBridge:
         """
         if self._registered:
             return self.fastapi_app
+
+        # Install user-supplied ASGI http middleware before routes are added.
+        for middleware_fn in self.middleware:
+            self.fastapi_app.middleware("http")(middleware_fn)
+
+        # Custom exception mapping: Celery exception type -> HTTP status code.
+        if self.error_mapping:
+            error_map = self.error_mapping.copy()
+
+            @self.fastapi_app.exception_handler(Exception)
+            async def _error_mapper(_request: Request, exc: Exception) -> JSONResponse:
+                code = error_map.get(type(exc), 500)
+                return JSONResponse(status_code=code, content={"detail": str(exc)})
 
         self._register_task_endpoints()
 
@@ -470,7 +612,7 @@ class CeleryFastAPIBridge:
         default_queue = self.celery_app.conf.task_default_queue or "celery"
 
         for name, task in self.celery_app.tasks.items():
-            if not self.task_filter(name):
+            if name in self.exclude or not self.task_filter(name):
                 continue
 
             queue_name = getattr(task, "queue", None) or default_queue
@@ -532,6 +674,11 @@ class CeleryFastAPIBridge:
             for field_name in payload_fields:
                 if field_name not in celery_option_names:
                     value = getattr(payload, field_name, None)
+                    # Pydantic task params arrive as model instances from the
+                    # dynamic payload; flatten to a plain dict for send_task
+                    # so the broker serializer (e.g. json) can encode it.
+                    if isinstance(value, BaseModel):
+                        value = value.model_dump()
                     if value is not None:
                         task_kwargs[field_name] = value
 
@@ -548,17 +695,36 @@ class CeleryFastAPIBridge:
                 if value is not None and opt_name != "queue":  # queue handled above
                     send_options[opt_name] = value
 
-            result = self.celery_app.send_task(actual_task_name, **send_options)
-            return TaskResponse(task_id=result.id, status="PENDING")
+            # Pre-hooks: run before dispatch (e.g. auth, audit). Raise -> 500.
+            for hook in self.pre_hooks:
+                hook(payload)
+
+            try:
+                result = self.celery_app.send_task(actual_task_name, **send_options)
+            except Exception as exc:  # noqa: BLE001
+                status = self.error_mapping.get(type(exc), 500)
+                raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+            response = TaskResponse(task_id=result.id, status="PENDING")
+
+            # Post-hooks: run after dispatch (e.g. notify, log).
+            for hook in self.post_hooks:
+                hook(response)
+
+            return response
 
         # Set a descriptive name for the endpoint
         run_task.__name__ = f"run_{task_name.replace('.', '_')}"
         run_task.__doc__ = f"Execute '{task_name}' task. Default queue: '{queue_name}'."
 
+        # Dependencies (e.g. auth provider) declared as FastAPI Depends.
+        deps = [Depends(d) for d in self.dependencies]
+
         self.fastapi_app.post(
             route_path,
             response_model=TaskResponse,
             tags=["tasks"],
+            dependencies=deps,
             summary=f"Run {task_name}",
             description=f"Submit '{task_name}' task for async execution.\n\nDefault queue: `{queue_name}`\n\nUse `_task_name` and `_queue` query params to override.",
         )(run_task)
@@ -798,9 +964,11 @@ class CeleryFastAPIBridge:
             for name in sorted(self._app_task_names):
                 task = self.celery_app.tasks.get(name)
                 if task:
+                    # Apply optional name mapping for public-facing names.
+                    public_name = self.name_mapping.get(name, name)
                     tasks_info.append(
                         {
-                            "name": name,
+                            "name": public_name,
                             "queue": getattr(task, "queue", None) or default_queue,
                             "rate_limit": getattr(task, "rate_limit", None),
                             "time_limit": getattr(task, "time_limit", None),
@@ -818,15 +986,110 @@ class CeleryFastAPIBridge:
                 "tasks": tasks_info,
             }
 
-        @self.fastapi_app.get(
-            f"{self.prefix}/queues",
-            tags=["workers"],
-            summary="List active queues",
+
+        @self.fastapi_app.post(
+            f"{self.prefix}/tasks/chain",
+            response_model=BatchTaskResponse,
+            tags=["tasks"],
+            summary="Execute tasks in a chain",
+            description="Execute multiple Celery tasks sequentially. Tasks are executed one after another, with the result of one task passed to the next.",
         )
-        async def list_queues() -> dict[str, Any]:
-            """Get information about active queues."""
-            inspector = self.celery_app.control.inspect()
-            return {"queues": inspector.active_queues() or {}}
+        async def chain_tasks(payload: BatchTaskRequest) -> BatchTaskResponse:
+            """Execute tasks in a chain.
+
+            Args:
+                payload: BatchTaskRequest containing a list of tasks.
+
+            Returns:
+                BatchTaskResponse with group ID and individual task IDs.
+            """
+            from celery import chain
+
+            if not payload.tasks:
+                raise HTTPException(status_code=422, detail="No tasks provided")
+
+            signatures = []
+            for item in payload.tasks:
+                if not item.task_name:
+                    raise HTTPException(status_code=422, detail="task_name is required for each task")
+
+                sig = self.celery_app.signature(
+                    item.task_name,
+                    args=item.args,
+                    kwargs=item.kwargs,
+                    queue=item.queue,
+                )
+                signatures.append(sig)
+
+            job = chain(*signatures)
+            result = job.apply_async()
+            task_ids = [r.id for r in result.children or []]
+
+            return BatchTaskResponse(
+                group_id=result.id,
+                task_ids=task_ids,
+                task_count=len(payload.tasks),
+                status="PENDING",
+            )
+
+        @self.fastapi_app.post(
+            f"{self.prefix}/tasks/chord",
+            response_model=BatchTaskResponse,
+            tags=["tasks"],
+            summary="Execute tasks in a chord",
+            description="Execute multiple Celery tasks as a group, followed by a callback task upon completion of all group tasks.",
+        )
+        async def chord_tasks(payload: dict[str, Any]) -> BatchTaskResponse:
+            """Execute tasks in a chord.
+
+            Args:
+                payload: Dictionary containing 'header' (list of BatchTaskItem)
+                         and 'callback' (task name string).
+
+            Returns:
+                BatchTaskResponse with group ID and individual task IDs.
+            """
+            from celery import chord
+
+            header_tasks = payload.get('header')
+            callback_task_name = payload.get('callback')
+
+            if not header_tasks or not callback_task_name:
+                raise HTTPException(status_code=422, detail="'header' and 'callback' are required for chord")
+
+            header_signatures = []
+            for item in header_tasks:
+                if not item.get('task_name'):
+                    raise HTTPException(status_code=422, detail="task_name is required for each task in header")
+
+                sig = self.celery_app.signature(
+                    item['task_name'],
+                    args=item.get('args', []),
+                    kwargs=item.get('kwargs', {}),
+                    queue=item.get('queue'),
+                )
+                header_signatures.append(sig)
+
+            callback_sig = self.celery_app.signature(callback_task_name)
+
+            # chord syntax: chord(header)(callback).apply_async()
+            job = chord(header_signatures, body=callback_sig)
+            result = job.apply_async()
+
+            # For chord, the header group task IDs are available via result.parent.children
+            # if we have the parent. But apply_async returns the callback result.
+            task_ids = []
+            if result.parent and result.parent.children:
+                 task_ids = [r.id for r in result.parent.children]
+
+            return BatchTaskResponse(
+                group_id=result.id,
+                task_ids=task_ids,
+                task_count=len(header_tasks),
+                status="PENDING",
+            )
+
+
 
         def _find_local_worker() -> str | None:
             """

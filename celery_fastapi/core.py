@@ -223,16 +223,22 @@ def _create_task_payload_model(
         if param.kind == inspect.Parameter.VAR_POSITIONAL:
             field_definitions[param_name] = (
                 list[param_type],
-                Field(default_factory=list, description=f"Positional arguments for {param_name}"),
+                Field(
+                    default_factory=list,
+                    description=f"Positional arguments for {param_name}",
+                ),
             )
-            example_kwargs[param_name] = [1, 2] # example
+            example_kwargs[param_name] = [1, 2]  # example
             continue
         elif param.kind == inspect.Parameter.VAR_KEYWORD:
             field_definitions[param_name] = (
                 dict[str, param_type],
-                Field(default_factory=dict, description=f"Keyword arguments for {param_name}"),
+                Field(
+                    default_factory=dict,
+                    description=f"Keyword arguments for {param_name}",
+                ),
             )
-            example_kwargs[param_name] = {"k":"v"} # example
+            example_kwargs[param_name] = {"k": "v"}  # example
             continue
 
         # Pydantic task param: annotated BaseModel subclass is used as-is.
@@ -435,6 +441,11 @@ class RedisRateLimitStorage(BaseRateLimitStorage):
         self._client = client
         self._window_seconds = window_seconds
         self._key_prefix = "celery_fastapi:ratelimit:"
+        self._seq = 0  # disambiguates members with identical timestamps
+
+    def _next_seq(self) -> int:
+        self._seq = (self._seq + 1) % (2**31)
+        return self._seq
 
     def _zkey(self, key: str) -> str:
         return f"{self._key_prefix}{key}"
@@ -452,7 +463,7 @@ class RedisRateLimitStorage(BaseRateLimitStorage):
         return int(self._client.zcard(zkey))
 
     def add(self, key: str, now: float) -> None:
-        self._client.zadd(self._zkey(key), {f"{now}:{key}": now})
+        self._client.zadd(self._zkey(key), {f"{now}:{key}:{self._next_seq()}": now})
 
 
 class RateLimiter:
@@ -685,9 +696,23 @@ class CeleryFastAPIBridge:
             # Build send_task options
             send_options: dict[str, Any] = {
                 "args": [],
-                "kwargs": task_kwargs,
+                "kwargs": {},
                 "queue": actual_queue,
             }
+
+            # Separate VAR_POSITIONAL (*args) and VAR_KEYWORD (**kwargs) fields
+            # VAR_POSITIONAL must go into send_options["args"], not kwargs
+            var_positional_name = None
+            for field_name, value in task_kwargs.items():
+                if field_name == "args" and isinstance(value, list):
+                    var_positional_name = field_name
+                elif field_name == "kwargs" and isinstance(value, dict):
+                    send_options["kwargs"] = value
+                elif field_name not in ("args", "kwargs"):
+                    send_options["kwargs"][field_name] = value
+
+            if var_positional_name is not None:
+                send_options["args"] = task_kwargs[var_positional_name]
 
             # Add Celery options if set
             for opt_name in celery_option_names:
@@ -986,7 +1011,6 @@ class CeleryFastAPIBridge:
                 "tasks": tasks_info,
             }
 
-
         @self.fastapi_app.post(
             f"{self.prefix}/tasks/chain",
             response_model=BatchTaskResponse,
@@ -1011,7 +1035,15 @@ class CeleryFastAPIBridge:
             signatures = []
             for item in payload.tasks:
                 if not item.task_name:
-                    raise HTTPException(status_code=422, detail="task_name is required for each task")
+                    raise HTTPException(
+                        status_code=422, detail="task_name is required for each task"
+                    )
+
+                if item.task_name not in self._app_task_names:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"task '{item.task_name}' is not registered in this app",
+                    )
 
                 sig = self.celery_app.signature(
                     item.task_name,
@@ -1051,22 +1083,40 @@ class CeleryFastAPIBridge:
             """
             from celery import chord
 
-            header_tasks = payload.get('header')
-            callback_task_name = payload.get('callback')
+            header_tasks = payload.get("header")
+            callback_task_name = payload.get("callback")
 
             if not header_tasks or not callback_task_name:
-                raise HTTPException(status_code=422, detail="'header' and 'callback' are required for chord")
+                raise HTTPException(
+                    status_code=422,
+                    detail="'header' and 'callback' are required for chord",
+                )
+
+            if callback_task_name not in self._app_task_names:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"task '{callback_task_name}' is not registered in this app",
+                )
 
             header_signatures = []
             for item in header_tasks:
-                if not item.get('task_name'):
-                    raise HTTPException(status_code=422, detail="task_name is required for each task in header")
+                if not item.get("task_name"):
+                    raise HTTPException(
+                        status_code=422,
+                        detail="task_name is required for each task in header",
+                    )
+
+                if item["task_name"] not in self._app_task_names:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"task '{item['task_name']}' is not registered in this app",
+                    )
 
                 sig = self.celery_app.signature(
-                    item['task_name'],
-                    args=item.get('args', []),
-                    kwargs=item.get('kwargs', {}),
-                    queue=item.get('queue'),
+                    item["task_name"],
+                    args=item.get("args", []),
+                    kwargs=item.get("kwargs", {}),
+                    queue=item.get("queue"),
                 )
                 header_signatures.append(sig)
 
@@ -1080,7 +1130,7 @@ class CeleryFastAPIBridge:
             # if we have the parent. But apply_async returns the callback result.
             task_ids = []
             if result.parent and result.parent.children:
-                 task_ids = [r.id for r in result.parent.children]
+                task_ids = [r.id for r in result.parent.children]
 
             return BatchTaskResponse(
                 group_id=result.id,
@@ -1088,8 +1138,6 @@ class CeleryFastAPIBridge:
                 task_count=len(header_tasks),
                 status="PENDING",
             )
-
-
 
         def _find_local_worker() -> str | None:
             """

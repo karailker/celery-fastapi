@@ -13,8 +13,7 @@ try:
     from rich.table import Table
 except ImportError:
     print(
-        "CLI dependencies not installed. "
-        "Install with: pip install celery-fastapi[cli]"
+        "CLI dependencies not installed. Install with: pip install celery-fastapi[cli]"
     )
     sys.exit(1)
 
@@ -393,7 +392,7 @@ def serve(
         uvicorn_config["interface"] = interface.value
 
     console.print(
-        f"\n[bold green]Starting server at http://{host}:{port}[/]" f"{prefix or ''}"
+        f"\n[bold green]Starting server at http://{host}:{port}[/]{prefix or ''}"
     )
     console.print("[dim]Press CTRL+C to stop[/]\n")
 

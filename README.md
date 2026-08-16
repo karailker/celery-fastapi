@@ -75,11 +75,13 @@ poetry add celery-fastapi
 from celery import Celery
 from celery_fastapi import CeleryFastAPIBridge, create_app
 
-celery_app = Celery('tasks', broker='redis://localhost:6379/0')
+celery_app = Celery("tasks", broker="redis://localhost:6379/0")
+
 
 @celery_app.task
 def add(x, y):
     return x + y
+
 
 # Option 1: Using create_app factory
 app = create_app(celery_app)
@@ -152,6 +154,7 @@ payload model uses that model directly, so nested schemas appear in OpenAPI:
 class Item(BaseModel):
     name: str
     qty: int = 1
+
 
 @celery_app.task(name="myapp.process")
 def process(payload: Item) -> dict:
@@ -226,18 +229,18 @@ from celery_fastapi import (
 
 bridge = CeleryFastAPIBridge(
     celery_app=celery_app,
-    fastapi_app=fastapi_app,              # Optional
-    prefix="/api/v1",                     # URL prefix
+    fastapi_app=fastapi_app,  # Optional
+    prefix="/api/v1",  # URL prefix
     include_status_endpoints=True,
     task_filter=lambda name: not name.startswith("internal."),
-    rate_limit=100,                       # req/min per client
-    rate_limit_storage=None,              # BaseRateLimitStorage instance
-    exclude={"internal.secret"},          # Hide from API
-    name_mapping={"my.add": "public_add"},# Rename in listings
+    rate_limit=100,  # req/min per client
+    rate_limit_storage=None,  # BaseRateLimitStorage instance
+    exclude={"internal.secret"},  # Hide from API
+    name_mapping={"my.add": "public_add"},  # Rename in listings
     middleware=[my_http_middleware],
     dependencies=[auth_provider],
-    pre_hooks=[audit_hook],               # receive payload
-    post_hooks=[notify_hook],             # receive response
+    pre_hooks=[audit_hook],  # receive payload
+    post_hooks=[notify_hook],  # receive response
     error_mapping={ValueError: 422},
 )
 ```
@@ -250,11 +253,13 @@ Rate limiting is backed by `BaseRateLimitStorage` (abstract). Default is in-memo
 ```python
 from celery_fastapi import BaseRateLimitStorage
 
+
 class RedisRateLimitStorage(BaseRateLimitStorage):
     def __init__(self, client): ...
     def prune(self, key, cutoff): ...
     def count(self, key): ...
     def add(self, key, now): ...
+
 
 bridge = CeleryFastAPIBridge(
     celery_app,
@@ -273,9 +278,11 @@ from celery_fastapi import CeleryFastAPIBridge
 
 app = FastAPI()
 
+
 @app.get("/health")
 def health_check():
     return {"status": "healthy"}
+
 
 bridge = CeleryFastAPIBridge(celery_app, app, prefix="/celery")
 bridge.register_routes()
@@ -307,6 +314,30 @@ poetry run pytest
 poetry run ruff check .
 poetry run mypy celery_fastapi
 ```
+
+### Integration test suite (broker/backend matrix)
+
+The repo ships a `docker-compose.yml` that brings up every broker/backend the
+test matrix exercises:
+
+```bash
+docker compose up -d                              # redis, rabbitmq, postgres, mysql, memcached, mongodb
+poetry run pytest tests/test_integration_broker_backend.py
+```
+
+Then start one worker for the end-to-end test and run it:
+
+```bash
+poetry run celery -A tests.broker_workers:live_app worker --loglevel=info
+poetry run pytest tests/test_integration_broker_backend.py::test_live_redis_broker_backend
+```
+
+The matrix covers all stable Celery brokers (Redis, RabbitMQ) crossed with nine
+result backends (redis, rpc, cache+memory, cache+memcached, db+sqlite,
+db+postgresql, db+mysql, mongodb, filesystem) — 18 combinations, each verified
+for bridge construction, broker dispatch, and result-backend round-trip. The
+`rpc` backend skips the round-trip layer (it needs a live reply consumer); the
+single live worker test uses Redis end to end. Missing drivers skip individually.
 
 ## License
 

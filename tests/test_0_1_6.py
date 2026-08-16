@@ -110,6 +110,32 @@ def test_in_memory_storage_default() -> None:
         limiter.check("k")
 
 
+def test_var_positional_args_dispatched_positionally() -> None:
+    """A *args task must send positional args, not kwargs (regression)."""
+    from unittest.mock import patch
+
+    from celery_fastapi.core import CeleryFastAPIBridge
+
+    app = _make_celery_app("test_varargs")
+    app.conf.task_always_eager = False  # exercise real send_task path
+    bridge = CeleryFastAPIBridge(app)
+    fastapi_app = bridge.register_routes()
+    client = TestClient(fastapi_app)
+
+    captured: dict[str, Any] = {}
+
+    def fake_send_task(_self: object, name: str, **opts: Any) -> object:
+        captured["name"] = name
+        captured["opts"] = opts
+        return type("R", (), {"id": "x"})()  # minimal AsyncResult-like
+
+    with patch.object(Celery, "send_task", fake_send_task):
+        client.post("/test_varargs/add_seq", json={"args": [1, 2, 3]})
+
+    assert captured["opts"]["args"] == [1, 2, 3]
+    assert "args" not in captured["opts"]["kwargs"]
+
+
 # 3. Chain endpoint
 def test_chain_endpoint() -> None:
     app = _make_celery_app("test_chain")
@@ -231,10 +257,7 @@ def test_middleware_installed() -> None:
         return await call_next(request)
 
     fastapi_app = create_app(app, middleware=[my_mw])
-    clz_names = [
-        repr(getattr(m, "clz", m))
-        for m in fastapi_app.user_middleware
-    ]
+    clz_names = [repr(getattr(m, "clz", m)) for m in fastapi_app.user_middleware]
     assert any("my_mw" in c for c in clz_names)
 
 
@@ -248,7 +271,6 @@ def test_dependencies_registered_on_route() -> None:
 
     fastapi_app = create_app(app, dependencies=[dep_provider])
     assert any(
-        getattr(r, "dependencies", None)
-        and len(r.dependencies) > 0
+        getattr(r, "dependencies", None) and len(r.dependencies) > 0
         for r in fastapi_app.routes
     )

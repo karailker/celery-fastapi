@@ -16,6 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Task discovery & mapping: Added `exclude` and `name_mapping` configuration.
 - Custom error mapping: Added `error_mapping` in bridge to translate exceptions into custom HTTP status codes.
 - Bridge Middleware & Dependencies: `CeleryFastAPIBridge` and `create_app` now accept `middleware` and `dependencies`.
+- `docker-compose.yml` dev & test suite: Redis, RabbitMQ, PostgreSQL, MySQL, Memcached, MongoDB.
+- Integration test matrix covering 18 broker/backend combinations (Redis/RabbitMQ × 9 backends) with construct, dispatch, and backend round-trip layers plus a live end-to-end worker test.
+
+### Fixed
+
+- `*args` (VAR_POSITIONAL) task params were sent as kwargs to `send_task`, causing `TypeError` at runtime; now routed to `args`.
+- Chain and chord endpoints accepted arbitrary task names outside the app scope; now validated against registered tasks (404 on unknown).
+- `RedisRateLimitStorage` ZSET member collision on identical timestamps undercounted rate-limit hits; a per-instance sequence counter disambiguates members.
 
 ## [0.1.5] - 2026-08-15
 

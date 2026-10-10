@@ -1,0 +1,38 @@
+# Celery worker with a celery-fastapi sidecar that exposes /healthz for probes.
+# The worker has no HTTP server of its own, so the sidecar answers for it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: celery-worker
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: celery-worker}
+  template:
+    metadata:
+      labels: {app: celery-worker}
+    spec:
+      containers:
+        - name: worker
+          image: myorg/myapp:latest
+          command: ["celery", "-A", "myapp.celery:app", "worker", "--loglevel=info"]
+          env:
+            # Must match the worker's node name so /healthz checks *this* worker.
+            - name: CELERY_WORKER_HOSTNAME
+              value: "celery@$(HOSTNAME)"
+        - name: health
+          image: myorg/myapp:latest
+          command: ["celery-fastapi", "serve", "myapp.celery:app", "--port", "8000"]
+          ports:
+            - containerPort: 8000
+          env:
+            - name: CELERY_WORKER_HOSTNAME
+              value: "celery@$(HOSTNAME)"
+          livenessProbe:
+            httpGet: {path: /healthz, port: 8000}
+            initialDelaySeconds: 20
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet: {path: /healthz, port: 8000}
+            periodSeconds: 15

@@ -104,3 +104,62 @@ def test_user_dependencies_apply_to_status_endpoints(celery_app: Celery) -> None
     assert client.get("/tasks/abc").status_code == 403
     assert client.post("/sec/add", json={"x": 1, "y": 2}).status_code == 403
     assert client.get("/healthz").status_code == 200
+
+
+def test_task_name_override_cannot_reach_unexposed_tasks(celery_app: Celery) -> None:
+    sent: list[str] = []
+    original = celery_app.send_task
+
+    def spy(name: str, *args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        sent.append(name)
+        return original(name, *args, **kwargs)
+
+    celery_app.send_task = spy  # type: ignore[method-assign]
+    client = TestClient(create_app(celery_app, exclude={"sec.hidden"}))
+
+    for target in ("other.app.delete_everything", "sec.hidden"):
+        resp = client.post(f"/sec/add?_task_name={target}", json={"x": 1, "y": 2})
+        assert resp.status_code == 404, target
+    assert sent == []
+
+
+def test_task_name_override_to_another_exposed_task_still_works(
+    celery_app: Celery,
+) -> None:
+    @celery_app.task(name="sec.mul")
+    def mul(x: int, y: int) -> int:
+        return x * y
+
+    client = TestClient(create_app(celery_app))
+    ok = client.post("/sec/add?_task_name=sec.mul", json={"x": 2, "y": 3})
+    assert ok.status_code == 200
+
+
+def test_queue_override_is_validated(celery_app: Celery) -> None:
+    client = TestClient(create_app(celery_app))
+    bad = client.post("/sec/add?_queue=bad%0Aqueue", json={"x": 1, "y": 2})
+    assert bad.status_code == 422
+    good = client.post("/sec/add?_queue=high-priority", json={"x": 1, "y": 2})
+    assert good.status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        ("/tasks/batch", {"tasks": [{"task_name": "other.app.task"}]}),
+        ("/tasks/chain", {"tasks": [{"task_name": "other.app.task"}]}),
+        (
+            "/tasks/chord",
+            {"header": [{"task_name": "sec.add"}], "callback": "other.app.task"},
+        ),
+        (
+            "/tasks/chord",
+            {"header": [{"task_name": "other.app.task"}], "callback": "sec.add"},
+        ),
+    ],
+)
+def test_workflow_endpoints_refuse_unexposed_tasks(
+    celery_app: Celery, path: str, body: dict[str, object]
+) -> None:
+    client = TestClient(create_app(celery_app))
+    assert client.post(path, json=body).status_code == 404

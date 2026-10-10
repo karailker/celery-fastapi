@@ -7,12 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.6] - 2026-08-16
 
+### Breaking changes
+
+- **Secure by default.** `POST /purge`, `POST /trigger`, `DELETE /tasks/{id}` and `POST /tasks/batch/revoke` are only registered with `enable_admin_endpoints=True` (`--enable-admin`). Add the flag if you use them.
+- `dependencies` now apply to every HTTP endpoint except `/healthz` and `/ping` (previously only per-task endpoints).
+- `/tasks/batch` only dispatches tasks exposed by the API (unknown names return `404`).
+
+### Security
+
+- The `_task_name` query override on per-task endpoints could run **any** task in the cluster, bypassing `exclude`, `task_filter` and the admin gating of `/trigger`. It now only accepts other tasks exposed by the API (`404` otherwise); `_queue` is validated like other queue names.
+
 ### Changed
 
 - `GET /tasks/{id}` now returns `200` with `state: PENDING` for unknown or not-yet-started tasks (previously `404`, which made freshly submitted tasks look missing). `GET /tasks/{id}/result` returns `202` in that case.
 
 ### Added
 
+- `api_key` / `api_key_header` authentication (also `?api_key=` for WebSockets) and `CELERY_FASTAPI_API_KEY`.
+- `Idempotency-Key` support on task endpoints and `/trigger` (`idempotency_ttl`).
+- Prometheus `/metrics` (`enable_metrics`), OpenTelemetry spans (`enable_tracing`, `otel` extra).
+- Server-Sent Events status stream `/tasks/{id}/events`; read-only `/schedules`; `worker`, `name`, `limit`, `offset` filters on `GET /tasks`.
+- Experimental MCP endpoint `/mcp` (`enable_mcp`).
+- CLI: `--enable-admin`, `--api-key`, `--metrics`, `--mcp` and a new `openapi` command.
+- `RedisRateLimitStorage`, `Metrics` and `IdempotencyStore` exported from the package.
+- Quickstart (`examples/quickstart`), Kubernetes sidecar example, `CONTRIBUTING.md`, `SECURITY.md`, `ROADMAP.md`, issue and PR templates.
 - Python 3.14, 3.15 and 3.16 support. 3.14 is tested in CI; 3.15 (release candidate) and 3.16 run as non-blocking CI jobs, and 3.16 joins the matrix automatically once `setup-python` can install it.
 - Tests for CLI commands, app loading, gunicorn integration, health/ping discovery and rate limiting (coverage 52% -> 77%).
 - Pydantic task parameter support: `_create_task_payload_model` now directly uses BaseModel subclasses for type-hinted task parameters.

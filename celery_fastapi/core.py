@@ -966,6 +966,23 @@ class CeleryFastAPIBridge:
 
             # Determine actual task name and queue
             actual_task_name = task_name_override or task_name
+            # Overrides may only redirect to another task this API exposes;
+            # otherwise any task in the cluster could be run from here.
+            if (
+                actual_task_name != task_name
+                and actual_task_name not in self._app_task_names
+            ):
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Task '{actual_task_name}' is not exposed by this API",
+                )
+            if queue_override is not None:
+                try:
+                    _validate_name(queue_override, "queue")
+                except ValueError as exc:
+                    raise HTTPException(
+                        status_code=422, detail=f"Invalid _queue: {exc}"
+                    ) from exc
             actual_queue = (
                 queue_override or getattr(payload, "queue", None) or queue_name
             )
@@ -1834,6 +1851,11 @@ class CeleryFastAPIBridge:
                     raise HTTPException(
                         status_code=422, detail="task_name is required for each task"
                     )
+                if item.task_name not in self._app_task_names:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Task '{item.task_name}' is not exposed by this API",
+                    )
                 sig = self.celery_app.signature(
                     item.task_name,
                     args=item.args,
@@ -1847,6 +1869,8 @@ class CeleryFastAPIBridge:
             result = job.apply_async()
 
             task_ids = [r.id for r in result.children or []]
+            for item in payload.tasks:
+                self.metrics.inc("tasks_submitted_total", item.task_name)
 
             return BatchTaskResponse(
                 group_id=result.id,

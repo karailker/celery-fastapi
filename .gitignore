@@ -154,3 +154,5 @@ Thumbs.db
 
 # Development documentation (local only)
 DEVELOPMENT.md
+worker.pid
+worker.log

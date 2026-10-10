@@ -1,0 +1,32 @@
+# Run:  docker compose up --build
+# Then: open http://localhost:8000/docs
+services:
+  redis:
+    image: redis:7.2-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  worker:
+    build: .
+    command: celery -A tasks:celery_app worker --loglevel=info --hostname worker@%h
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  api:
+    build: .
+    command: celery-fastapi serve tasks:celery_app --host 0.0.0.0 --port 8000 --metrics
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      # Set a key to protect every endpoint except /healthz and /ping:
+      # CELERY_FASTAPI_API_KEY: change-me
+    ports:
+      - "8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy

@@ -4,7 +4,7 @@ on:
   push:
     branches: [main, develop]
   pull_request:
-    branches: [main]
+    branches: [main, "feature/**"]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -55,12 +55,37 @@ jobs:
       - name: Run mypy
         run: poetry run mypy celery_fastapi
 
-  test:
+  python-matrix:
+    # Pre-release interpreters join the matrix only once setup-python can
+    # install them, so an unpublished version never turns CI red.
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+    steps:
+      - name: Build Python test matrix
+        id: build
+        run: |
+          manifest=$(curl -fsSL https://raw.githubusercontent.com/actions/python-versions/main/versions-manifest.json || echo '[]')
+          include='[]'
+          for v in 3.15 3.16; do
+            if echo "$manifest" | jq -e --arg v "$v" 'any(.[]; .version | startswith($v + "."))' >/dev/null; then
+              include=$(echo "$include" | jq -c --arg v "$v" '. + [{"python-version": $v, "experimental": true}]')
+            else
+              echo "::notice::Python $v is not published yet; skipping its test job"
+            fi
+          done
+          matrix=$(jq -nc --argjson inc "$include" '{"python-version":["3.11","3.12","3.13","3.14"],"experimental":[false],"include":$inc}')
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  test:
+    name: test (${{ matrix.python-version }})
+    needs: python-matrix
+    runs-on: ubuntu-latest
+    # Pre-release interpreters must not block merges.
+    continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
-      matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+      matrix: ${{ fromJSON(needs.python-matrix.outputs.matrix) }}
 
     steps:
       - uses: actions/checkout@v4
@@ -69,6 +94,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          allow-prereleases: true
 
       - name: Install Poetry
         uses: snok/install-poetry@v1
@@ -92,8 +118,24 @@ jobs:
       - name: Install project
         run: poetry install --no-interaction --extras all
 
+      - name: Start broker/backend services
+        run: docker compose up -d --wait
+
+      - name: Start live Celery worker
+        run: |
+          nohup poetry run celery -A tests.broker_workers:live_app worker \
+            --loglevel=warning -P solo > worker.log 2>&1 &
+          echo $! > worker.pid
+          sleep 8
+
       - name: Run tests with coverage
         run: poetry run pytest --cov=celery_fastapi --cov-report=xml
+
+      - name: Stop worker and services
+        if: always()
+        run: |
+          kill "$(cat worker.pid)" 2>/dev/null || true
+          docker compose down -v
 
       - name: Upload coverage to Codecov
         if: matrix.python-version == '3.11'

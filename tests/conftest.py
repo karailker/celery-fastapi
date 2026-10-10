@@ -45,7 +45,7 @@ def fastapi_app() -> FastAPI:
 @pytest.fixture
 def bridge(celery_app: Celery, fastapi_app: FastAPI) -> CeleryFastAPIBridge:
     """Create a test CeleryFastAPIBridge instance."""
-    return CeleryFastAPIBridge(celery_app, fastapi_app)
+    return CeleryFastAPIBridge(celery_app, fastapi_app, enable_admin_endpoints=True)
 
 
 @pytest.fixture
@@ -63,7 +63,7 @@ def client(app_with_routes: FastAPI) -> TestClient:
 @pytest.fixture
 def created_app(celery_app: Celery) -> FastAPI:
     """Create an app using the create_app factory."""
-    return create_app(celery_app)
+    return create_app(celery_app, enable_admin_endpoints=True)
 
 
 @pytest.fixture

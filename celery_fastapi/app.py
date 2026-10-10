@@ -3,13 +3,14 @@
 import importlib
 import importlib.util
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from celery import Celery
 from fastapi import FastAPI
 
-from celery_fastapi.core import CeleryFastAPIBridge
+from celery_fastapi.core import BaseRateLimitStorage, CeleryFastAPIBridge
 
 
 def load_celery_app(celery_app_path: str) -> Celery:
@@ -86,6 +87,21 @@ def create_app(
     include_status_endpoints: bool = True,
     fastapi_kwargs: dict[str, Any] | None = None,
     rate_limit: int | None = None,
+    rate_limit_storage: BaseRateLimitStorage | None = None,
+    middleware: list[Callable] | None = None,
+    dependencies: list[Callable[..., Any]] | None = None,
+    exclude: set[str] | None = None,
+    name_mapping: dict[str, str] | None = None,
+    pre_hooks: list[Callable] | None = None,
+    post_hooks: list[Callable] | None = None,
+    error_mapping: dict[type[Exception], int] | None = None,
+    enable_admin_endpoints: bool = False,
+    api_key: str | None = None,
+    api_key_header: str = "X-API-Key",
+    enable_metrics: bool = False,
+    enable_mcp: bool = False,
+    enable_tracing: bool = False,
+    idempotency_ttl: float = 86400.0,
 ) -> FastAPI:
     """
     Create a FastAPI application with Celery task endpoints.
@@ -145,6 +161,21 @@ def create_app(
         prefix=prefix,
         include_status_endpoints=include_status_endpoints,
         rate_limit=rate_limit,
+        rate_limit_storage=rate_limit_storage,
+        middleware=middleware,
+        dependencies=dependencies,
+        exclude=exclude,
+        name_mapping=name_mapping,
+        pre_hooks=pre_hooks,
+        post_hooks=post_hooks,
+        error_mapping=error_mapping,
+        enable_admin_endpoints=enable_admin_endpoints,
+        api_key=api_key,
+        api_key_header=api_key_header,
+        enable_metrics=enable_metrics,
+        enable_mcp=enable_mcp,
+        enable_tracing=enable_tracing,
+        idempotency_ttl=idempotency_ttl,
     )
 
     # Register all routes

@@ -64,7 +64,7 @@ def test_batch_revoke_response() -> None:
     def add(x: int, y: int) -> int:
         return x + y
 
-    fastapi_app = create_app(celery_app)
+    fastapi_app = create_app(celery_app, enable_admin_endpoints=True)
     client = TestClient(fastapi_app)
 
     # Batch execution (returns 200 status)
@@ -91,3 +91,19 @@ def test_batch_revoke_response() -> None:
                 },  # Revoke one to avoid eager repeat execution
             )
             assert revoke_response.status_code == 200
+
+
+def test_batch_rejects_unsafe_task_name(client) -> None:  # type: ignore[no-untyped-def]
+    """Batch items go through the same name validation as /trigger."""
+    response = client.post(
+        "/tasks/batch", json={"tasks": [{"task_name": "bad name; rm -rf /"}]}
+    )
+    assert response.status_code == 422
+
+
+def test_batch_rejects_unsafe_queue(client) -> None:  # type: ignore[no-untyped-def]
+    response = client.post(
+        "/tasks/batch",
+        json={"tasks": [{"task_name": "test_app.add", "queue": "q\nx"}]},
+    )
+    assert response.status_code == 422

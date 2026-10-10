@@ -17,10 +17,10 @@ jobs:
   lint:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -32,7 +32,7 @@ jobs:
 
       - name: Load cached venv
         id: cached-poetry-dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .venv
           key: venv-lint-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ hashFiles('**/poetry.lock') }}
@@ -88,10 +88,10 @@ jobs:
       matrix: ${{ fromJSON(needs.python-matrix.outputs.matrix) }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
           allow-prereleases: true
@@ -104,7 +104,7 @@ jobs:
 
       - name: Load cached venv
         id: cached-poetry-dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .venv
           key: venv-test-${{ runner.os }}-py${{ matrix.python-version }}-${{ hashFiles('**/poetry.lock') }}
@@ -149,12 +149,12 @@ jobs:
     runs-on: ubuntu-24.04
     needs: [lint, test]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # full history so poetry-dynamic-versioning reads the tag
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -170,7 +170,7 @@ jobs:
           python -c "import celery_fastapi; print(f'Version: {celery_fastapi.__version__}')"
 
       - name: Store build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/

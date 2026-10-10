@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
-from enum import Enum
+from enum import StrEnum
 from typing import Annotated, Any
 
 try:
@@ -13,13 +13,12 @@ try:
     from rich.table import Table
 except ImportError:
     print(
-        "CLI dependencies not installed. "
-        "Install with: pip install celery-fastapi[cli]"
+        "CLI dependencies not installed. Install with: pip install celery-fastapi[cli]"
     )
     sys.exit(1)
 
 
-class LogLevel(str, Enum):
+class LogLevel(StrEnum):
     """Log level options."""
 
     critical = "critical"
@@ -30,7 +29,7 @@ class LogLevel(str, Enum):
     trace = "trace"
 
 
-class LoopType(str, Enum):
+class LoopType(StrEnum):
     """Event loop implementation options."""
 
     auto = "auto"
@@ -38,7 +37,7 @@ class LoopType(str, Enum):
     uvloop = "uvloop"
 
 
-class HttpProtocol(str, Enum):
+class HttpProtocol(StrEnum):
     """HTTP protocol implementation options."""
 
     auto = "auto"
@@ -46,7 +45,7 @@ class HttpProtocol(str, Enum):
     httptools = "httptools"
 
 
-class WsProtocol(str, Enum):
+class WsProtocol(StrEnum):
     """WebSocket protocol implementation options."""
 
     auto = "auto"
@@ -55,7 +54,7 @@ class WsProtocol(str, Enum):
     wsproto = "wsproto"
 
 
-class InterfaceType(str, Enum):
+class InterfaceType(StrEnum):
     """ASGI interface version."""
 
     auto = "auto"
@@ -393,7 +392,7 @@ def serve(
         uvicorn_config["interface"] = interface.value
 
     console.print(
-        f"\n[bold green]Starting server at http://{host}:{port}[/]" f"{prefix or ''}"
+        f"\n[bold green]Starting server at http://{host}:{port}[/]{prefix or ''}"
     )
     console.print("[dim]Press CTRL+C to stop[/]\n")
 

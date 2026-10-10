@@ -47,3 +47,16 @@ def test_ratelimit_rejects_over_limit() -> None:
     assert (
         "limit exceeded" in response.text.lower() or "too many" in response.text.lower()
     )
+
+
+def test_ratelimit_covers_trigger_and_batch() -> None:
+    """Rate limit is shared across task, trigger and batch endpoints."""
+    client = _make_app_with_ratelimit(rate_limit=2)
+
+    trigger = {"task_name": "test_ratelimit.add", "queue": "celery", "args": [1, 2]}
+    assert client.post("/trigger", json=trigger).status_code == 200
+    batch = {"tasks": [{"task_name": "test_ratelimit.add", "args": [1, 2]}]}
+    assert client.post("/tasks/batch", json=batch).status_code == 200
+
+    assert client.post("/trigger", json=trigger).status_code == 429
+    assert client.post("/tasks/batch", json=batch).status_code == 429

@@ -95,6 +95,9 @@ def create_app(
     pre_hooks: list[Callable] | None = None,
     post_hooks: list[Callable] | None = None,
     error_mapping: dict[type[Exception], int] | None = None,
+    enable_admin_endpoints: bool = False,
+    api_key: str | None = None,
+    api_key_header: str = "X-API-Key",
 ) -> FastAPI:
     """
     Create a FastAPI application with Celery task endpoints.
@@ -162,6 +165,9 @@ def create_app(
         pre_hooks=pre_hooks,
         post_hooks=post_hooks,
         error_mapping=error_mapping,
+        enable_admin_endpoints=enable_admin_endpoints,
+        api_key=api_key,
+        api_key_header=api_key_header,
     )
 
     # Register all routes

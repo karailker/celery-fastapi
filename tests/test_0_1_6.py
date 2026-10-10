@@ -83,7 +83,7 @@ def test_pydantic_payload_preserves_nested_schema() -> None:
 def test_generic_task_payload_still_supported() -> None:
     """The /trigger endpoint still uses GenericTaskPayload."""
     app = _make_celery_app("test_generic")
-    fastapi_app = create_app(app)
+    fastapi_app = create_app(app, enable_admin_endpoints=True)
     client = TestClient(fastapi_app)
 
     response = client.post(

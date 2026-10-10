@@ -64,7 +64,7 @@ def test_batch_revoke_response() -> None:
     def add(x: int, y: int) -> int:
         return x + y
 
-    fastapi_app = create_app(celery_app)
+    fastapi_app = create_app(celery_app, enable_admin_endpoints=True)
     client = TestClient(fastapi_app)
 
     # Batch execution (returns 200 status)

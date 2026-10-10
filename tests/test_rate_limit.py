@@ -19,7 +19,9 @@ def _make_app_with_ratelimit(rate_limit: int = 2) -> TestClient:
     def add(x: int, y: int) -> int:
         return x + y
 
-    fastapi_app = create_app(celery_app, rate_limit=rate_limit)
+    fastapi_app = create_app(
+        celery_app, rate_limit=rate_limit, enable_admin_endpoints=True
+    )
     return TestClient(fastapi_app)
 
 

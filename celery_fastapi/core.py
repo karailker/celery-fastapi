@@ -1,6 +1,7 @@
 """Core functionality for Celery FastAPI."""
 
 import asyncio
+import hmac
 import inspect
 import threading
 import time
@@ -515,6 +516,38 @@ class RateLimiter:
             self._storage.add(key, now)
 
 
+class _RouteGroup:
+    """Registers routes directly on the app with shared dependencies.
+
+    Used instead of ``APIRouter`` + ``include_router`` because recent FastAPI
+    versions wrap included routers, hiding individual routes from
+    ``app.routes`` (and from ``get_registered_routes``).
+    """
+
+    def __init__(
+        self, app: FastAPI, dependencies: list[Any], enabled: bool = True
+    ) -> None:
+        self._app = app
+        self._dependencies = dependencies
+        self._enabled = enabled
+
+    def _decorator(self, method: str, path: str, **kwargs: Any) -> Callable[..., Any]:
+        if not self._enabled:
+            return lambda func: func
+        kwargs.setdefault("dependencies", self._dependencies)
+        decorator: Callable[..., Any] = getattr(self._app, method)(path, **kwargs)
+        return decorator
+
+    def get(self, path: str, **kwargs: Any) -> Callable[..., Any]:
+        return self._decorator("get", path, **kwargs)
+
+    def post(self, path: str, **kwargs: Any) -> Callable[..., Any]:
+        return self._decorator("post", path, **kwargs)
+
+    def delete(self, path: str, **kwargs: Any) -> Callable[..., Any]:
+        return self._decorator("delete", path, **kwargs)
+
+
 class CeleryFastAPIBridge:
     """
     Bridge class that connects Celery tasks to FastAPI endpoints.
@@ -556,6 +589,9 @@ class CeleryFastAPIBridge:
         pre_hooks: list[Callable] | None = None,
         post_hooks: list[Callable] | None = None,
         error_mapping: dict[type[Exception], int] | None = None,
+        enable_admin_endpoints: bool = False,
+        api_key: str | None = None,
+        api_key_header: str = "X-API-Key",
     ) -> None:
         """
         Initialize the Celery FastAPI Bridge.
@@ -573,12 +609,19 @@ class CeleryFastAPIBridge:
             rate_limit_storage: Pluggable storage for rate-limit hits (defaults to
                         in-memory). Pass a shared store for multi-worker setups.
             middleware: ASGI HTTP middleware callables to install on the FastAPI app.
-            dependencies: FastAPI ``Depends`` providers injected into task endpoints.
+            dependencies: FastAPI ``Depends`` providers applied to every HTTP
+                        endpoint except ``/healthz`` and ``/ping``.
             exclude: Task names to hide from the API.
             name_mapping: Maps internal task names to public names shown in the API.
             pre_hooks: Callables run before task dispatch; receive the payload.
             post_hooks: Callables run after task dispatch; receive task id and result.
             error_mapping: Maps exception types to HTTP status codes for error responses.
+            enable_admin_endpoints: Expose the destructive / unrestricted endpoints
+                        (``/purge``, ``/trigger``, task revocation). Off by default.
+            api_key: If set, every endpoint except ``/healthz`` and ``/ping`` requires
+                        this key (compared in constant time).
+            api_key_header: Header carrying the API key (default ``X-API-Key``).
+                        WebSockets also accept an ``api_key`` query parameter.
         """
         self.celery_app = celery_app
         self.fastapi_app = fastapi_app or FastAPI()
@@ -595,6 +638,9 @@ class CeleryFastAPIBridge:
         self.pre_hooks = pre_hooks or []
         self.post_hooks = post_hooks or []
         self.error_mapping = error_mapping or {}
+        self.enable_admin_endpoints = enable_admin_endpoints
+        self.api_key = api_key
+        self.api_key_header = api_key_header
         self._registered = False
 
         # Store the registered task names from THIS app only
@@ -602,6 +648,29 @@ class CeleryFastAPIBridge:
         for name in self.celery_app.tasks:
             if name not in self.exclude and self.task_filter(name):
                 self._app_task_names.add(name)
+
+    def _key_matches(self, supplied: str | None) -> bool:
+        if self.api_key is None:
+            return True
+        return supplied is not None and hmac.compare_digest(
+            supplied.encode(), self.api_key.encode()
+        )
+
+    def _protected_deps(self) -> list[Any]:
+        """Dependencies applied to every protected HTTP endpoint."""
+        deps: list[Any] = []
+        if self.api_key is not None:
+            header_name = self.api_key_header
+
+            def require_api_key(request: Request) -> None:
+                if not self._key_matches(request.headers.get(header_name)):
+                    raise HTTPException(
+                        status_code=401, detail="Invalid or missing API key"
+                    )
+
+            deps.append(Depends(require_api_key))
+        deps.extend(Depends(d) for d in self.dependencies)
+        return deps
 
     def _check_rate_limit(self, request: Request) -> None:
         """Apply the per-client rate limit (no-op when not configured)."""
@@ -762,8 +831,8 @@ class CeleryFastAPIBridge:
         run_task.__name__ = f"run_{task_name.replace('.', '_')}"
         run_task.__doc__ = f"Execute '{task_name}' task. Default queue: '{queue_name}'."
 
-        # Dependencies (e.g. auth provider) declared as FastAPI Depends.
-        deps = [Depends(d) for d in self.dependencies]
+        # API key + user dependencies (e.g. auth provider) as FastAPI Depends.
+        deps = self._protected_deps()
 
         self.fastapi_app.post(
             route_path,
@@ -776,8 +845,15 @@ class CeleryFastAPIBridge:
 
     def _register_status_endpoints(self) -> None:
         """Register task status, listing, and control endpoints."""
+        # Protected: API key + user dependencies. Admin: protected + opt-in.
+        # Public: probes only (/healthz, /ping), so orchestrators can reach them.
+        router = _RouteGroup(self.fastapi_app, self._protected_deps())
+        admin = _RouteGroup(
+            self.fastapi_app, self._protected_deps(), self.enable_admin_endpoints
+        )
+        public = _RouteGroup(self.fastapi_app, [])
 
-        @self.fastapi_app.get(
+        @router.get(
             f"{self.prefix}/tasks/{{task_id}}",
             response_model=TaskStatusResponse,
             tags=["task-status"],
@@ -813,7 +889,7 @@ class CeleryFastAPIBridge:
                 info=info if info else None,
             )
 
-        @self.fastapi_app.delete(
+        @admin.delete(
             f"{self.prefix}/tasks/{{task_id}}",
             tags=["task-status"],
             summary="Revoke a task",
@@ -840,7 +916,7 @@ class CeleryFastAPIBridge:
             )
             return {"status": "revoked", "task_id": task_id}
 
-        @self.fastapi_app.get(
+        @router.get(
             f"{self.prefix}/tasks/{{task_id}}/result",
             tags=["task-status"],
             summary="Get task result",
@@ -894,6 +970,12 @@ class CeleryFastAPIBridge:
             ponytail: polling-based. For high-throughput streams, replace with
             Celery events (celery_app.events.Receiver) or Redis pub/sub.
             """
+            supplied = websocket.headers.get(self.api_key_header) or (
+                websocket.query_params.get("api_key")
+            )
+            if not self._key_matches(supplied):
+                await websocket.close(code=1008)
+                return
             await websocket.accept()
             result = AsyncResult(task_id, app=self.celery_app)
 
@@ -921,7 +1003,7 @@ class CeleryFastAPIBridge:
             except WebSocketDisconnect:
                 pass
 
-        @self.fastapi_app.get(
+        @router.get(
             f"{self.prefix}/tasks",
             response_model=TaskListResponse,
             tags=["task-status"],
@@ -959,7 +1041,7 @@ class CeleryFastAPIBridge:
                 or {},  # Revoked is just task IDs, can't filter
             )
 
-        @self.fastapi_app.get(
+        @router.get(
             f"{self.prefix}/workers",
             tags=["workers"],
             summary="List workers",
@@ -987,7 +1069,7 @@ class CeleryFastAPIBridge:
                 "active_queues": inspector.active_queues() or {},
             }
 
-        @self.fastapi_app.get(
+        @router.get(
             f"{self.prefix}/available-tasks",
             tags=["tasks"],
             summary="List available tasks",
@@ -1028,7 +1110,7 @@ class CeleryFastAPIBridge:
                 "tasks": tasks_info,
             }
 
-        @self.fastapi_app.post(
+        @router.post(
             f"{self.prefix}/tasks/chain",
             response_model=BatchTaskResponse,
             tags=["tasks"],
@@ -1085,7 +1167,7 @@ class CeleryFastAPIBridge:
                 status="PENDING",
             )
 
-        @self.fastapi_app.post(
+        @router.post(
             f"{self.prefix}/tasks/chord",
             response_model=BatchTaskResponse,
             tags=["tasks"],
@@ -1251,7 +1333,7 @@ class CeleryFastAPIBridge:
             except Exception:  # noqa: BLE001
                 return None
 
-        @self.fastapi_app.get(
+        @public.get(
             f"{self.prefix}/healthz",
             response_model=HealthCheckResponse,
             tags=["health"],
@@ -1310,7 +1392,7 @@ class CeleryFastAPIBridge:
                 worker_online=worker_online,
             )
 
-        @self.fastapi_app.get(
+        @public.get(
             f"{self.prefix}/ping",
             response_model=PingResponse,
             tags=["health"],
@@ -1364,7 +1446,7 @@ class CeleryFastAPIBridge:
                 response=worker_response,
             )
 
-        @self.fastapi_app.post(
+        @admin.post(
             f"{self.prefix}/purge",
             tags=["workers"],
             summary="Purge all tasks",
@@ -1374,7 +1456,7 @@ class CeleryFastAPIBridge:
             count = self.celery_app.control.purge()
             return {"purged": count or 0}
 
-        @self.fastapi_app.post(
+        @admin.post(
             f"{self.prefix}/trigger",
             response_model=TaskResponse,
             tags=["tasks"],
@@ -1440,7 +1522,7 @@ class CeleryFastAPIBridge:
             result = self.celery_app.send_task(payload.task_name, **send_options)
             return TaskResponse(task_id=result.id, status="PENDING")
 
-        @self.fastapi_app.post(
+        @router.post(
             f"{self.prefix}/tasks/batch",
             response_model=BatchTaskResponse,
             tags=["tasks"],
@@ -1495,7 +1577,7 @@ class CeleryFastAPIBridge:
                 status="PENDING",
             )
 
-        @self.fastapi_app.post(
+        @admin.post(
             f"{self.prefix}/tasks/batch/revoke",
             summary="Revoke multiple tasks",
         )

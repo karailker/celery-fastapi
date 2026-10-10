@@ -40,6 +40,8 @@ filter_unconventional = true
 split_commits = false
 commit_preprocessors = []
 commit_parsers = [
+    # Housekeeping that should not appear in public release notes.
+    { message = "AI-related files|CLAUDE\\.md|AGENTS\\.md|MEMORY\\.md", skip = true },
     { message = "^feat", group = "<!-- 0 -->🚀 Features" },
     { message = "^fix", group = "<!-- 1 -->🐛 Bug Fixes" },
     { message = "^doc", group = "<!-- 3 -->📚 Documentation" },

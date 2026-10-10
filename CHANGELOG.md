@@ -5,28 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.6] - 2026-08-16
 
 ### Changed
 
 - `GET /tasks/{id}` now returns `200` with `state: PENDING` for unknown or not-yet-started tasks (previously `404`, which made freshly submitted tasks look missing). `GET /tasks/{id}/result` returns `202` in that case.
 
-### Fixed
-
-- Rate limiting now also applies to `/trigger`, `/tasks/batch`, `/tasks/chain` and `/tasks/chord`; the limiter is thread-safe.
-- Batch/chain items are validated with the same task and queue name rules as `/trigger`.
-- Blocking Celery calls no longer run on the event loop (sync handlers run in the threadpool; WebSocket polling uses `asyncio.to_thread`).
-- mypy errors for `*args` / `**kwargs` payload fields.
-
 ### Added
 
-- Python 3.14 support (tested), Python 3.15 (beta) and 3.16 (pre-release) run as non-blocking CI jobs.
+- Python 3.14, 3.15 and 3.16 support. 3.14 is tested in CI; 3.15 (beta) and 3.16 (pre-release) run as non-blocking CI jobs until they are released.
 - Tests for CLI commands, app loading, gunicorn integration, health/ping discovery and rate limiting (coverage 52% -> 77%).
-
-## [0.1.6] - 2026-08-16
-
-### Added
-
 - Pydantic task parameter support: `_create_task_payload_model` now directly uses BaseModel subclasses for type-hinted task parameters.
 - Pluggable rate limiting: Introduced `BaseRateLimitStorage` with `InMemoryRateLimitStorage` and optional `RedisRateLimitStorage`.
 - Chain and Chord workflow primitives: Added `/tasks/chain` and `/tasks/chord` endpoints.
@@ -39,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Rate limiting now also applies to `/trigger`, `/tasks/batch`, `/tasks/chain` and `/tasks/chord`; the limiter is thread-safe.
+- Batch/chain items are validated with the same task and queue name rules as `/trigger`.
+- Blocking Celery calls no longer run on the event loop (sync handlers run in the threadpool; WebSocket polling uses `asyncio.to_thread`).
+- mypy errors for `*args` / `**kwargs` payload fields and the `dependencies` annotation.
 - `*args` (VAR_POSITIONAL) task params were sent as kwargs to `send_task`, causing `TypeError` at runtime; now routed to `args`.
 - Chain and chord endpoints accepted arbitrary task names outside the app scope; now validated against registered tasks (404 on unknown).
 - `RedisRateLimitStorage` ZSET member collision on identical timestamps undercounted rate-limit hits; a per-instance sequence counter disambiguates members.

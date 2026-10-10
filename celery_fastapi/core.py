@@ -550,7 +550,7 @@ class CeleryFastAPIBridge:
         rate_limit: int | None = None,
         rate_limit_storage: BaseRateLimitStorage | None = None,
         middleware: list[Callable] | None = None,
-        dependencies: list[Depends] | None = None,
+        dependencies: list[Callable[..., Any]] | None = None,
         exclude: set[str] | None = None,
         name_mapping: dict[str, str] | None = None,
         pre_hooks: list[Callable] | None = None,

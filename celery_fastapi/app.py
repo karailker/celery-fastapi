@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from celery import Celery
-from fastapi import Depends, FastAPI
+from fastapi import FastAPI
 
 from celery_fastapi.core import BaseRateLimitStorage, CeleryFastAPIBridge
 
@@ -89,7 +89,7 @@ def create_app(
     rate_limit: int | None = None,
     rate_limit_storage: BaseRateLimitStorage | None = None,
     middleware: list[Callable] | None = None,
-    dependencies: list[Depends] | None = None,
+    dependencies: list[Callable[..., Any]] | None = None,
     exclude: set[str] | None = None,
     name_mapping: dict[str, str] | None = None,
     pre_hooks: list[Callable] | None = None,

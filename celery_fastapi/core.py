@@ -2,6 +2,7 @@
 
 import asyncio
 import inspect
+import threading
 import time
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
@@ -104,6 +105,19 @@ CELERY_OPTIONS_FIELDS: dict[str, Any] = {
 }
 
 
+def _validate_name(value: str, field_name: str | None) -> str:
+    """Reject empty, control-char or otherwise unsafe task/queue names."""
+    if not value or not value.strip():
+        raise ValueError("must be a non-empty string")
+    if any(ord(c) < 0x20 for c in value):
+        raise ValueError("control characters are not allowed")
+    if not all(c.isalnum() or c in "._-" for c in value):
+        raise ValueError("only alphanumeric, '.', '_', '-' allowed")
+    if field_name == "task_name" and len(value) > 255:
+        raise ValueError("task_name exceeds 255 character limit")
+    return value
+
+
 class GenericTaskPayload(BaseModel):
     """Generic payload for triggering any task by name."""
 
@@ -159,15 +173,7 @@ class GenericTaskPayload(BaseModel):
     @classmethod
     def _validate_names(cls, value: str, info: ValidationInfo) -> str:
         # Trust boundary: reject control chars / injection attempts.
-        if not value or not value.strip():
-            raise ValueError("must be a non-empty string")
-        if any(ord(c) < 0x20 for c in value):
-            raise ValueError("control characters are not allowed")
-        if not all(c.isalnum() or c in "._-" for c in value):
-            raise ValueError("only alphanumeric, '.', '_', '-' allowed")
-        if info.field_name == "task_name" and len(value) > 255:
-            raise ValueError("task_name exceeds 255 character limit")
-        return value
+        return _validate_name(value, info.field_name)
 
 
 def _python_type_to_json_type(py_type: type) -> str:
@@ -222,7 +228,7 @@ def _create_task_payload_model(
         # Handle var-positional (*args) and var-keyword (**kwargs)
         if param.kind == inspect.Parameter.VAR_POSITIONAL:
             field_definitions[param_name] = (
-                list[param_type],
+                list[param_type],  # type: ignore[valid-type]
                 Field(
                     default_factory=list,
                     description=f"Positional arguments for {param_name}",
@@ -232,7 +238,7 @@ def _create_task_payload_model(
             continue
         elif param.kind == inspect.Parameter.VAR_KEYWORD:
             field_definitions[param_name] = (
-                dict[str, param_type],
+                dict[str, param_type],  # type: ignore[valid-type]
                 Field(
                     default_factory=dict,
                     description=f"Keyword arguments for {param_name}",
@@ -344,6 +350,13 @@ class BatchTaskItem(BaseModel):
         default_factory=dict, description="Keyword arguments for the task"
     )
     countdown: float | None = Field(default=None, description="Seconds to wait")
+
+    @field_validator("task_name", "queue")
+    @classmethod
+    def _validate_names(cls, value: str | None, info: ValidationInfo) -> str | None:
+        if value is None:
+            return value
+        return _validate_name(value, info.field_name)
 
 
 class BatchTaskRequest(BaseModel):
@@ -482,20 +495,24 @@ class RateLimiter:
         self.limit = limit
         self.window_seconds = window_seconds
         self._storage = storage or InMemoryRateLimitStorage()
+        # Sync endpoints run in a threadpool; make prune/count/add atomic.
+        self._lock = threading.Lock()
 
     def check(self, key: str) -> None:
         """Record a hit for ``key``; raise HTTPException(429) if over limit."""
         now = time.monotonic()
         cutoff = now - self.window_seconds
-        self._storage.prune(key, cutoff)
 
-        if self._storage.count(key) >= self.limit:
-            raise HTTPException(
-                status_code=429,
-                detail=f"Rate limit exceeded: {self.limit} requests per {self.window_seconds}s",
-            )
+        with self._lock:
+            self._storage.prune(key, cutoff)
 
-        self._storage.add(key, now)
+            if self._storage.count(key) >= self.limit:
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Rate limit exceeded: {self.limit} requests per {self.window_seconds}s",
+                )
+
+            self._storage.add(key, now)
 
 
 class CeleryFastAPIBridge:
@@ -533,7 +550,7 @@ class CeleryFastAPIBridge:
         rate_limit: int | None = None,
         rate_limit_storage: BaseRateLimitStorage | None = None,
         middleware: list[Callable] | None = None,
-        dependencies: list[Depends] | None = None,
+        dependencies: list[Callable[..., Any]] | None = None,
         exclude: set[str] | None = None,
         name_mapping: dict[str, str] | None = None,
         pre_hooks: list[Callable] | None = None,
@@ -585,6 +602,12 @@ class CeleryFastAPIBridge:
         for name in self.celery_app.tasks:
             if name not in self.exclude and self.task_filter(name):
                 self._app_task_names.add(name)
+
+    def _check_rate_limit(self, request: Request) -> None:
+        """Apply the per-client rate limit (no-op when not configured)."""
+        if self.rate_limiter is not None:
+            client_ip = request.client.host if request.client else "unknown"
+            self.rate_limiter.check(client_ip)
 
     def register_routes(self) -> FastAPI:
         """
@@ -649,7 +672,7 @@ class CeleryFastAPIBridge:
             PayloadModel = GenericTaskPayload
 
         # Create the endpoint handler
-        async def run_task(
+        def run_task(
             request: Request,
             payload: PayloadModel,  # type: ignore[valid-type]
             task_name_override: str | None = Query(
@@ -664,10 +687,7 @@ class CeleryFastAPIBridge:
             ),
         ) -> TaskResponse:
             """Execute a Celery task asynchronously."""
-            # Rate limit check (per client IP)
-            if self.rate_limiter is not None:
-                client_ip = request.client.host if request.client else "unknown"
-                self.rate_limiter.check(client_ip)
+            self._check_rate_limit(request)
 
             # Determine actual task name and queue
             actual_task_name = task_name_override or task_name
@@ -763,22 +783,19 @@ class CeleryFastAPIBridge:
             tags=["task-status"],
             summary="Get task status",
         )
-        async def get_task_status(task_id: str) -> TaskStatusResponse:
+        def get_task_status(task_id: str) -> TaskStatusResponse:
             """
             Get the status of a specific task by its ID.
 
             Returns detailed information including state, result, and traceback.
 
             Raises:
-                HTTPException: 404 if the task is not found.
+                Nothing: unknown/not-started tasks report state PENDING.
             """
             result = AsyncResult(task_id, app=self.celery_app)
 
-            if result.state == "PENDING":
-                raise HTTPException(
-                    status_code=404, detail=f"Task '{task_id}' not found"
-                )
-
+            # Celery reports PENDING for unknown *and* not-yet-started tasks;
+            # treat both as PENDING so freshly submitted tasks are queryable.
             # Build info dict with additional metadata
             info: dict[str, Any] = {}
             if hasattr(result, "info") and result.info:
@@ -801,7 +818,7 @@ class CeleryFastAPIBridge:
             tags=["task-status"],
             summary="Revoke a task",
         )
-        async def revoke_task(
+        def revoke_task(
             task_id: str,
             payload: TaskRevokePayload | None = None,
         ) -> dict[str, str]:
@@ -828,7 +845,7 @@ class CeleryFastAPIBridge:
             tags=["task-status"],
             summary="Get task result",
         )
-        async def get_task_result(task_id: str, timeout: float | None = None) -> Any:
+        def get_task_result(task_id: str, timeout: float | None = None) -> Any:
             """
             Get the result of a completed task.
 
@@ -840,14 +857,9 @@ class CeleryFastAPIBridge:
                 The task result.
 
             Raises:
-                HTTPException: 404 if not found, 202 if not ready, 500 on failure.
+                HTTPException: 202 if not ready (including PENDING), 500 on failure.
             """
             result = AsyncResult(task_id, app=self.celery_app)
-
-            if result.state == "PENDING":
-                raise HTTPException(
-                    status_code=404, detail=f"Task '{task_id}' not found"
-                )
 
             if not result.ready():
                 if timeout:
@@ -884,22 +896,27 @@ class CeleryFastAPIBridge:
             """
             await websocket.accept()
             result = AsyncResult(task_id, app=self.celery_app)
+
+            def snapshot() -> dict[str, Any]:
+                frame: dict[str, Any] = {
+                    "task_id": task_id,
+                    "state": result.state,
+                    "ready": result.ready(),
+                }
+                if frame["ready"]:
+                    if result.failed():
+                        frame["error"] = str(result.traceback or "task failed")
+                    else:
+                        frame["result"] = result.result
+                return frame
+
             try:
                 while True:
-                    state = result.state
-                    frame: dict[str, Any] = {
-                        "task_id": task_id,
-                        "state": state,
-                        "ready": result.ready(),
-                    }
-                    if result.ready():
-                        if result.failed():
-                            frame["error"] = str(result.traceback or "task failed")
-                        else:
-                            frame["result"] = result.result
-                        await websocket.send_json(frame)
-                        break
+                    # Backend lookups are blocking I/O; keep them off the loop.
+                    frame = await asyncio.to_thread(snapshot)
                     await websocket.send_json(frame)
+                    if frame["ready"]:
+                        break
                     await asyncio.sleep(0.5)
             except WebSocketDisconnect:
                 pass
@@ -910,7 +927,7 @@ class CeleryFastAPIBridge:
             tags=["task-status"],
             summary="List all tasks",
         )
-        async def list_all_tasks() -> TaskListResponse:
+        def list_all_tasks() -> TaskListResponse:
             """
             List active, scheduled, reserved, and revoked tasks for THIS app only.
 
@@ -947,7 +964,7 @@ class CeleryFastAPIBridge:
             tags=["workers"],
             summary="List workers",
         )
-        async def list_workers() -> dict[str, Any]:
+        def list_workers() -> dict[str, Any]:
             """
             Get information about Celery workers that can execute THIS app's tasks.
 
@@ -1018,7 +1035,9 @@ class CeleryFastAPIBridge:
             summary="Execute tasks in a chain",
             description="Execute multiple Celery tasks sequentially. Tasks are executed one after another, with the result of one task passed to the next.",
         )
-        async def chain_tasks(payload: BatchTaskRequest) -> BatchTaskResponse:
+        def chain_tasks(
+            request: Request, payload: BatchTaskRequest
+        ) -> BatchTaskResponse:
             """Execute tasks in a chain.
 
             Args:
@@ -1028,6 +1047,8 @@ class CeleryFastAPIBridge:
                 BatchTaskResponse with group ID and individual task IDs.
             """
             from celery import chain
+
+            self._check_rate_limit(request)
 
             if not payload.tasks:
                 raise HTTPException(status_code=422, detail="No tasks provided")
@@ -1071,7 +1092,7 @@ class CeleryFastAPIBridge:
             summary="Execute tasks in a chord",
             description="Execute multiple Celery tasks as a group, followed by a callback task upon completion of all group tasks.",
         )
-        async def chord_tasks(payload: dict[str, Any]) -> BatchTaskResponse:
+        def chord_tasks(request: Request, payload: dict[str, Any]) -> BatchTaskResponse:
             """Execute tasks in a chord.
 
             Args:
@@ -1082,6 +1103,8 @@ class CeleryFastAPIBridge:
                 BatchTaskResponse with group ID and individual task IDs.
             """
             from celery import chord
+
+            self._check_rate_limit(request)
 
             header_tasks = payload.get("header")
             callback_task_name = payload.get("callback")
@@ -1234,7 +1257,7 @@ class CeleryFastAPIBridge:
             tags=["health"],
             summary="Health check",
         )
-        async def health_check(
+        def health_check(
             worker: str | None = Query(
                 default=None,
                 description=(
@@ -1293,7 +1316,7 @@ class CeleryFastAPIBridge:
             tags=["health"],
             summary="Ping worker",
         )
-        async def ping_worker(
+        def ping_worker(
             worker: str | None = Query(
                 default=None,
                 description=(
@@ -1346,7 +1369,7 @@ class CeleryFastAPIBridge:
             tags=["workers"],
             summary="Purge all tasks",
         )
-        async def purge_tasks() -> dict[str, int]:
+        def purge_tasks() -> dict[str, int]:
             """Purge all pending tasks from the queue."""
             count = self.celery_app.control.purge()
             return {"purged": count or 0}
@@ -1357,7 +1380,9 @@ class CeleryFastAPIBridge:
             tags=["tasks"],
             summary="Trigger any task",
         )
-        async def trigger_generic_task(payload: GenericTaskPayload) -> TaskResponse:
+        def trigger_generic_task(
+            request: Request, payload: GenericTaskPayload
+        ) -> TaskResponse:
             """
             Trigger any Celery task by name.
 
@@ -1371,6 +1396,8 @@ class CeleryFastAPIBridge:
 
             Note: queue is required - you must specify which queue to send the task to.
             """
+            self._check_rate_limit(request)
+
             # Build send_task options - queue is required in GenericTaskPayload
             send_options: dict[str, Any] = {
                 "args": payload.args,
@@ -1419,7 +1446,8 @@ class CeleryFastAPIBridge:
             tags=["tasks"],
             summary="Execute multiple tasks in a group",
         )
-        async def batch_execute_tasks(
+        def batch_execute_tasks(
+            request: Request,
             payload: BatchTaskRequest,
         ) -> BatchTaskResponse:
             """
@@ -1432,6 +1460,8 @@ class CeleryFastAPIBridge:
                 Group ID, individual task IDs, and count of submitted tasks.
             """
             from celery import group
+
+            self._check_rate_limit(request)
 
             # Validate: at least one task required
             if not payload.tasks:
@@ -1469,7 +1499,7 @@ class CeleryFastAPIBridge:
             f"{self.prefix}/tasks/batch/revoke",
             summary="Revoke multiple tasks",
         )
-        async def batch_revoke_tasks(
+        def batch_revoke_tasks(
             payload: dict[str, list[str]],
         ) -> dict[str, Any]:
             """

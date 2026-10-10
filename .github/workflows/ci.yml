@@ -4,7 +4,7 @@ on:
   push:
     branches: [main, develop]
   pull_request:
-    branches: [main]
+    branches: [main, "feature/**"]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -92,8 +92,24 @@ jobs:
       - name: Install project
         run: poetry install --no-interaction --extras all
 
+      - name: Start broker/backend services
+        run: docker compose up -d --wait
+
+      - name: Start live Celery worker
+        run: |
+          nohup poetry run celery -A tests.broker_workers:live_app worker \
+            --loglevel=warning -P solo > worker.log 2>&1 &
+          echo $! > worker.pid
+          sleep 8
+
       - name: Run tests with coverage
         run: poetry run pytest --cov=celery_fastapi --cov-report=xml
+
+      - name: Stop worker and services
+        if: always()
+        run: |
+          kill "$(cat worker.pid)" 2>/dev/null || true
+          docker compose down -v
 
       - name: Upload coverage to Codecov
         if: matrix.python-version == '3.11'

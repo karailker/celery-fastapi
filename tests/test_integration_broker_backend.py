@@ -23,6 +23,7 @@ test (test_live_redis_broker_backend) uses a Redis backend.
 
 from __future__ import annotations
 
+import os
 import time
 
 import pytest
@@ -38,6 +39,7 @@ RABBIT_URL = "amqp://admin:admin@localhost:5672//"
 # (name, broker, backend, driver-guard list)
 # Filesystem path is module-level so the backend can write/read it.
 FS_PATH = "/tmp/cf_fs_results"
+os.makedirs(FS_PATH, exist_ok=True)
 
 MATRIX: list[tuple[str, str, str, list[str]]] = [
     ("redis+redis", f"{REDIS_URL}/11", f"{REDIS_URL}/12", []),

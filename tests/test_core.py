@@ -192,10 +192,15 @@ class TestTaskEndpoints:
 class TestStatusEndpoints:
     """Tests for task status endpoints."""
 
-    def test_get_task_status_not_found(self, client: TestClient) -> None:
-        """Test getting status of non-existent task."""
+    def test_get_task_status_unknown_is_pending(self, client: TestClient) -> None:
+        """Unknown/not-started tasks report PENDING (Celery semantics)."""
         response = client.get("/tasks/nonexistent-task-id")
-        assert response.status_code == 404
+        assert response.status_code == 200
+        assert response.json()["state"] == "PENDING"
+
+    def test_get_task_result_pending_is_202(self, client: TestClient) -> None:
+        response = client.get("/tasks/nonexistent-task-id/result")
+        assert response.status_code == 202
 
     def test_list_all_tasks(self, client: TestClient) -> None:
         """Test listing all tasks."""

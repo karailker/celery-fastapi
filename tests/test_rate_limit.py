@@ -47,3 +47,23 @@ def test_ratelimit_rejects_over_limit() -> None:
     assert (
         "limit exceeded" in response.text.lower() or "too many" in response.text.lower()
     )
+
+
+def test_ratelimit_covers_trigger_batch_chain_chord() -> None:
+    """One limit is shared across every submit endpoint."""
+    client = _make_app_with_ratelimit(rate_limit=3)
+
+    trigger = {"task_name": "test_ratelimit.add", "queue": "celery", "args": [1, 2]}
+    item = {"task_name": "test_ratelimit.add", "args": [1, 2]}
+    assert client.post("/trigger", json=trigger).status_code == 200
+    assert client.post("/tasks/batch", json={"tasks": [item]}).status_code == 200
+    assert client.post("/tasks/chain", json={"tasks": [item]}).status_code == 200
+
+    chord = {"header": [item], "callback": "test_ratelimit.add"}
+    for path, body in [
+        ("/trigger", trigger),
+        ("/tasks/batch", {"tasks": [item]}),
+        ("/tasks/chain", {"tasks": [item]}),
+        ("/tasks/chord", chord),
+    ]:
+        assert client.post(path, json=body).status_code == 429

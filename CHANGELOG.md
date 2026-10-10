@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Python 3.14 support (tested), Python 3.15 (beta) and 3.16 (pre-release) run as non-blocking CI jobs.
 - Tests for CLI commands, app loading, gunicorn integration, health/ping discovery and rate limiting (coverage 52% -> 77%).
 
 ## [0.1.6] - 2026-08-16

@@ -32,7 +32,7 @@ Automatic REST API generation for Celery tasks with FastAPI. This package seamle
 
 ## Requirements
 
-- Python 3.11+
+- Python 3.11+ (tested on 3.11–3.14; 3.15 beta and 3.16 pre-release in CI)
 - FastAPI 0.100.0+
 - Celery 5.3.0+ (tested up to 5.6.3)
 

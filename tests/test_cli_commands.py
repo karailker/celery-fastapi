@@ -1,5 +1,6 @@
 """Tests for CLI commands against an importable sample app."""
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -99,3 +100,63 @@ def test_create_app_from_env_requires_variable(
     monkeypatch.delenv("CELERY_FASTAPI_CELERY_APP", raising=False)
     with pytest.raises(ValueError, match="CELERY_FASTAPI_CELERY_APP"):
         cli._create_app_from_env()
+
+
+def test_routes_hides_admin_by_default_and_shows_with_flag() -> None:
+    plain = runner.invoke(app, ["routes", SAMPLE]).stdout
+    assert "/purge" not in plain
+    admin = runner.invoke(app, ["routes", SAMPLE, "--enable-admin", "--metrics"]).stdout
+    assert "/purge" in admin
+    assert "/metrics" in admin
+
+
+def test_openapi_prints_schema() -> None:
+    import json
+
+    result = runner.invoke(app, ["openapi", SAMPLE])
+    assert result.exit_code == 0
+    schema = json.loads(result.stdout)
+    assert "/sample/add" in schema["paths"]
+    assert "/purge" not in schema["paths"]
+
+
+def test_openapi_writes_file_with_feature_flags(tmp_path: Path) -> None:
+    import json
+
+    out = tmp_path / "openapi.json"
+    result = runner.invoke(
+        app, ["openapi", SAMPLE, "--enable-admin", "--mcp", "-o", str(out)]
+    )
+    assert result.exit_code == 0
+    paths = json.loads(out.read_text())["paths"]
+    assert "/purge" in paths
+    assert "/mcp" in paths
+
+
+def test_serve_passes_feature_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "uvicorn.run", lambda target, **_kw: captured.update(app=target)
+    )
+    result = runner.invoke(
+        app, ["serve", SAMPLE, "--enable-admin", "--api-key", "k", "--metrics"]
+    )
+    assert result.exit_code == 0
+    bridge = captured["app"].state.celery_bridge
+    assert bridge.enable_admin_endpoints is True
+    assert bridge.api_key == "k"
+    assert bridge.enable_metrics is True
+
+
+def test_create_app_from_env_reads_feature_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CELERY_FASTAPI_CELERY_APP", SAMPLE)
+    monkeypatch.setenv("CELERY_FASTAPI_ENABLE_ADMIN", "1")
+    monkeypatch.setenv("CELERY_FASTAPI_API_KEY", "secret")
+    monkeypatch.setenv("CELERY_FASTAPI_MCP", "true")
+    bridge = cli._create_app_from_env().state.celery_bridge
+    assert bridge.enable_admin_endpoints is True
+    assert bridge.api_key == "secret"
+    assert bridge.enable_mcp is True
+    assert bridge.enable_metrics is False

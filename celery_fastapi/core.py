@@ -1,8 +1,11 @@
 """Core functionality for Celery FastAPI."""
 
 import asyncio
+import contextlib
+import hashlib
 import hmac
 import inspect
+import json
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -19,10 +22,11 @@ from fastapi import (
     HTTPException,
     Query,
     Request,
+    Response,
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field, ValidationInfo, create_model, field_validator
 
 # Celery execution options - shared fields for all task payloads
@@ -516,6 +520,81 @@ class RateLimiter:
             self._storage.add(key, now)
 
 
+class Metrics:
+    """Tiny dependency-free Prometheus text-format counters."""
+
+    def __init__(self) -> None:
+        self._counters: dict[tuple[str, str], int] = defaultdict(int)
+        self._lock = threading.Lock()
+
+    def inc(self, metric: str, task: str = "") -> None:
+        with self._lock:
+            self._counters[(metric, task)] += 1
+
+    @staticmethod
+    def _escape(value: str) -> str:
+        return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+    def render(self, gauges: dict[str, float]) -> str:
+        helps = {
+            "tasks_submitted_total": "Tasks dispatched through the API",
+            "dispatch_errors_total": "Task dispatches that raised an error",
+            "rate_limited_total": "Requests rejected by the rate limiter",
+        }
+        with self._lock:
+            items = sorted(self._counters.items())
+        lines: list[str] = []
+        for metric, text in helps.items():
+            name = f"celery_fastapi_{metric}"
+            lines += [f"# HELP {name} {text}", f"# TYPE {name} counter"]
+            for (m, task), value in items:
+                if m != metric:
+                    continue
+                label = f'{{task="{self._escape(task)}"}}' if task else ""
+                lines.append(f"{name}{label} {value}")
+        for gauge, gauge_value in sorted(gauges.items()):
+            name = f"celery_fastapi_{gauge}"
+            lines += [f"# TYPE {name} gauge", f"{name} {gauge_value}"]
+        return "\n".join(lines) + "\n"
+
+
+class IdempotencyStore:
+    """In-memory ``Idempotency-Key`` store (best effort, single process)."""
+
+    def __init__(self, ttl: float = 86400.0, max_items: int = 10000) -> None:
+        self.ttl = ttl
+        self.max_items = max_items
+        self._items: dict[str, tuple[float, str, TaskResponse]] = {}
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def fingerprint(*parts: str) -> str:
+        return hashlib.sha256("\x00".join(parts).encode()).hexdigest()
+
+    def lookup(self, key: str, fingerprint: str) -> "TaskResponse | None":
+        now = time.monotonic()
+        with self._lock:
+            entry = self._items.get(key)
+            if entry is None or entry[0] < now:
+                return None
+            if entry[1] != fingerprint:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Idempotency-Key was already used with a different request",
+                )
+            return entry[2]
+
+    def save(self, key: str, fingerprint: str, response: "TaskResponse") -> None:
+        now = time.monotonic()
+        with self._lock:
+            self._items[key] = (now + self.ttl, fingerprint, response)
+            if len(self._items) > self.max_items:
+                for old in sorted(self._items, key=lambda k: self._items[k][0])[
+                    : len(self._items) - self.max_items
+                ]:
+                    del self._items[old]
+
+
 class _RouteGroup:
     """Registers routes directly on the app with shared dependencies.
 
@@ -592,6 +671,10 @@ class CeleryFastAPIBridge:
         enable_admin_endpoints: bool = False,
         api_key: str | None = None,
         api_key_header: str = "X-API-Key",
+        enable_metrics: bool = False,
+        enable_mcp: bool = False,
+        enable_tracing: bool = False,
+        idempotency_ttl: float = 86400.0,
     ) -> None:
         """
         Initialize the Celery FastAPI Bridge.
@@ -622,6 +705,11 @@ class CeleryFastAPIBridge:
                         this key (compared in constant time).
             api_key_header: Header carrying the API key (default ``X-API-Key``).
                         WebSockets also accept an ``api_key`` query parameter.
+            enable_metrics: Expose Prometheus text metrics at ``/metrics``.
+            enable_mcp: Expose tasks as MCP tools at ``/mcp`` (experimental).
+            enable_tracing: Wrap dispatches in OpenTelemetry spans (requires
+                        ``opentelemetry-api``).
+            idempotency_ttl: Seconds an ``Idempotency-Key`` is remembered.
         """
         self.celery_app = celery_app
         self.fastapi_app = fastapi_app or FastAPI()
@@ -641,6 +729,22 @@ class CeleryFastAPIBridge:
         self.enable_admin_endpoints = enable_admin_endpoints
         self.api_key = api_key
         self.api_key_header = api_key_header
+        self.enable_metrics = enable_metrics
+        self.enable_mcp = enable_mcp
+        self.enable_tracing = enable_tracing
+        self.metrics = Metrics()
+        self.idempotency = IdempotencyStore(idempotency_ttl)
+        self._task_models: dict[str, type[BaseModel]] = {}
+        self._tracer: Any = None
+        if enable_tracing:
+            try:
+                from opentelemetry import trace
+            except ImportError as exc:
+                raise ImportError(
+                    "enable_tracing requires opentelemetry-api. "
+                    "Install with: pip install celery-fastapi[otel]"
+                ) from exc
+            self._tracer = trace.get_tracer("celery_fastapi")
         self._registered = False
 
         # Store the registered task names from THIS app only
@@ -676,7 +780,107 @@ class CeleryFastAPIBridge:
         """Apply the per-client rate limit (no-op when not configured)."""
         if self.rate_limiter is not None:
             client_ip = request.client.host if request.client else "unknown"
-            self.rate_limiter.check(client_ip)
+            try:
+                self.rate_limiter.check(client_ip)
+            except HTTPException:
+                self.metrics.inc("rate_limited_total")
+                raise
+
+    def _task_snapshot(self, task_id: str) -> dict[str, Any]:
+        """Current state of a task as a JSON-friendly frame (blocking I/O)."""
+        result = AsyncResult(task_id, app=self.celery_app)
+        frame: dict[str, Any] = {
+            "task_id": task_id,
+            "state": result.state,
+            "ready": result.ready(),
+        }
+        if frame["ready"]:
+            if result.failed():
+                frame["error"] = str(result.traceback or "task failed")
+            else:
+                frame["result"] = result.result
+        return frame
+
+    def _dispatch(self, task_name: str, send_options: dict[str, Any]) -> Any:
+        """Send a task, recording metrics and (optionally) a tracing span."""
+        span: Any = contextlib.nullcontext()
+        if self._tracer is not None:
+            span = self._tracer.start_as_current_span(
+                "celery_fastapi.send_task",
+                attributes={
+                    "celery.task_name": task_name,
+                    "celery.queue": str(send_options.get("queue", "")),
+                },
+            )
+        with span:
+            try:
+                result = self.celery_app.send_task(task_name, **send_options)
+            except Exception:
+                self.metrics.inc("dispatch_errors_total", task_name)
+                raise
+        self.metrics.inc("tasks_submitted_total", task_name)
+        return result
+
+    def _idempotent_lookup(
+        self, request: Request, response: Response, scope: str, fingerprint: str
+    ) -> "TaskResponse | None":
+        key = request.headers.get("Idempotency-Key")
+        if not key:
+            return None
+        found = self.idempotency.lookup(
+            f"{scope}:{key}", IdempotencyStore.fingerprint(scope, fingerprint)
+        )
+        if found is not None:
+            response.headers["Idempotent-Replayed"] = "true"
+        return found
+
+    def _idempotent_save(
+        self, request: Request, scope: str, fingerprint: str, result: "TaskResponse"
+    ) -> None:
+        key = request.headers.get("Idempotency-Key")
+        if key:
+            self.idempotency.save(
+                f"{scope}:{key}",
+                IdempotencyStore.fingerprint(scope, fingerprint),
+                result,
+            )
+
+    def _build_send_options(self, payload: Any, queue: str) -> dict[str, Any]:
+        """Translate a task payload model into ``send_task`` keyword arguments."""
+        celery_option_names = set(CELERY_OPTIONS_FIELDS.keys())
+        task_kwargs: dict[str, Any] = {}
+
+        # Access model_fields from the class, not the instance (Pydantic V2.11+)
+        for field_name in type(payload).model_fields:
+            if field_name not in celery_option_names:
+                value = getattr(payload, field_name, None)
+                # Pydantic task params arrive as model instances; flatten to a
+                # plain dict so the broker serializer (e.g. json) can encode it.
+                if isinstance(value, BaseModel):
+                    value = value.model_dump()
+                if value is not None:
+                    task_kwargs[field_name] = value
+
+        send_options: dict[str, Any] = {"args": [], "kwargs": {}, "queue": queue}
+
+        # VAR_POSITIONAL (*args) must go into send_options["args"], not kwargs
+        var_positional_name = None
+        for field_name, value in task_kwargs.items():
+            if field_name == "args" and isinstance(value, list):
+                var_positional_name = field_name
+            elif field_name == "kwargs" and isinstance(value, dict):
+                send_options["kwargs"] = value
+            elif field_name not in ("args", "kwargs"):
+                send_options["kwargs"][field_name] = value
+
+        if var_positional_name is not None:
+            send_options["args"] = task_kwargs[var_positional_name]
+
+        for opt_name in celery_option_names:
+            value = getattr(payload, opt_name, None)
+            if value is not None and opt_name != "queue":  # queue handled above
+                send_options[opt_name] = value
+        return send_options
 
     def register_routes(self) -> FastAPI:
         """
@@ -739,10 +943,12 @@ class CeleryFastAPIBridge:
         else:
             # Fallback to generic model if we can't inspect the task
             PayloadModel = GenericTaskPayload
+        self._task_models[task_name] = PayloadModel
 
         # Create the endpoint handler
         def run_task(
             request: Request,
+            response: Response,
             payload: PayloadModel,  # type: ignore[valid-type]
             task_name_override: str | None = Query(
                 default=None,
@@ -764,68 +970,33 @@ class CeleryFastAPIBridge:
                 queue_override or getattr(payload, "queue", None) or queue_name
             )
 
-            # Extract task arguments from payload
-            # Get all field names that are task parameters (not Celery options)
-            celery_option_names = set(CELERY_OPTIONS_FIELDS.keys())
-            task_kwargs: dict[str, Any] = {}
+            send_options = self._build_send_options(payload, actual_queue)
 
-            # Access model_fields from the class, not the instance (Pydantic V2.11+)
-            payload_fields = type(payload).model_fields  # type: ignore[attr-defined]
-            for field_name in payload_fields:
-                if field_name not in celery_option_names:
-                    value = getattr(payload, field_name, None)
-                    # Pydantic task params arrive as model instances from the
-                    # dynamic payload; flatten to a plain dict for send_task
-                    # so the broker serializer (e.g. json) can encode it.
-                    if isinstance(value, BaseModel):
-                        value = value.model_dump()
-                    if value is not None:
-                        task_kwargs[field_name] = value
-
-            # Build send_task options
-            send_options: dict[str, Any] = {
-                "args": [],
-                "kwargs": {},
-                "queue": actual_queue,
-            }
-
-            # Separate VAR_POSITIONAL (*args) and VAR_KEYWORD (**kwargs) fields
-            # VAR_POSITIONAL must go into send_options["args"], not kwargs
-            var_positional_name = None
-            for field_name, value in task_kwargs.items():
-                if field_name == "args" and isinstance(value, list):
-                    var_positional_name = field_name
-                elif field_name == "kwargs" and isinstance(value, dict):
-                    send_options["kwargs"] = value
-                elif field_name not in ("args", "kwargs"):
-                    send_options["kwargs"][field_name] = value
-
-            if var_positional_name is not None:
-                send_options["args"] = task_kwargs[var_positional_name]
-
-            # Add Celery options if set
-            for opt_name in celery_option_names:
-                value = getattr(payload, opt_name, None)
-                if value is not None and opt_name != "queue":  # queue handled above
-                    send_options[opt_name] = value
+            fingerprint = f"{actual_queue}:{payload.model_dump_json()}"  # type: ignore[attr-defined]
+            replay = self._idempotent_lookup(
+                request, response, actual_task_name, fingerprint
+            )
+            if replay is not None:
+                return replay
 
             # Pre-hooks: run before dispatch (e.g. auth, audit). Raise -> 500.
             for hook in self.pre_hooks:
                 hook(payload)
 
             try:
-                result = self.celery_app.send_task(actual_task_name, **send_options)
+                result = self._dispatch(actual_task_name, send_options)
             except Exception as exc:  # noqa: BLE001
                 status = self.error_mapping.get(type(exc), 500)
                 raise HTTPException(status_code=status, detail=str(exc)) from exc
 
-            response = TaskResponse(task_id=result.id, status="PENDING")
+            task_response = TaskResponse(task_id=result.id, status="PENDING")
+            self._idempotent_save(request, actual_task_name, fingerprint, task_response)
 
             # Post-hooks: run after dispatch (e.g. notify, log).
             for hook in self.post_hooks:
-                hook(response)
+                hook(task_response)
 
-            return response
+            return task_response
 
         # Set a descriptive name for the endpoint
         run_task.__name__ = f"run_{task_name.replace('.', '_')}"
@@ -977,25 +1148,10 @@ class CeleryFastAPIBridge:
                 await websocket.close(code=1008)
                 return
             await websocket.accept()
-            result = AsyncResult(task_id, app=self.celery_app)
-
-            def snapshot() -> dict[str, Any]:
-                frame: dict[str, Any] = {
-                    "task_id": task_id,
-                    "state": result.state,
-                    "ready": result.ready(),
-                }
-                if frame["ready"]:
-                    if result.failed():
-                        frame["error"] = str(result.traceback or "task failed")
-                    else:
-                        frame["result"] = result.result
-                return frame
-
             try:
                 while True:
                     # Backend lookups are blocking I/O; keep them off the loop.
-                    frame = await asyncio.to_thread(snapshot)
+                    frame = await asyncio.to_thread(self._task_snapshot, task_id)
                     await websocket.send_json(frame)
                     if frame["ready"]:
                         break
@@ -1009,7 +1165,18 @@ class CeleryFastAPIBridge:
             tags=["task-status"],
             summary="List all tasks",
         )
-        def list_all_tasks() -> TaskListResponse:
+        def list_all_tasks(
+            worker: str | None = Query(
+                default=None, description="Only tasks on this worker"
+            ),
+            name: str | None = Query(
+                default=None, description="Only tasks whose name contains this text"
+            ),
+            limit: int | None = Query(
+                default=None, ge=1, le=1000, description="Max tasks per worker list"
+            ),
+            offset: int = Query(default=0, ge=0, description="Skip this many tasks"),
+        ) -> TaskListResponse:
             """
             List active, scheduled, reserved, and revoked tasks for THIS app only.
 
@@ -1025,20 +1192,31 @@ class CeleryFastAPIBridge:
                 if not tasks_by_worker:
                     return {}
                 filtered: dict[str, list[dict[str, Any]]] = {}
-                for worker, task_list in tasks_by_worker.items():
+                for worker_name, task_list in tasks_by_worker.items():
+                    if worker is not None and worker_name != worker:
+                        continue
                     filtered_list = [
-                        t for t in task_list if t.get("name") in self._app_task_names
+                        t
+                        for t in task_list
+                        if t.get("name") in self._app_task_names
+                        and (name is None or name in str(t.get("name")))
                     ]
-                    if filtered_list:
-                        filtered[worker] = filtered_list
+                    page = filtered_list[
+                        offset : None if limit is None else offset + limit
+                    ]
+                    if page:
+                        filtered[worker_name] = page
                 return filtered
 
             return TaskListResponse(
                 active=filter_tasks(inspector.active()),
                 scheduled=filter_tasks(inspector.scheduled()),
                 reserved=filter_tasks(inspector.reserved()),
-                revoked=inspector.revoked()
-                or {},  # Revoked is just task IDs, can't filter
+                revoked={
+                    w: ids
+                    for w, ids in (inspector.revoked() or {}).items()
+                    if worker is None or w == worker
+                },  # Revoked is just task IDs, can't filter by task name
             )
 
         @router.get(
@@ -1148,6 +1326,11 @@ class CeleryFastAPIBridge:
                         detail=f"task '{item.task_name}' is not registered in this app",
                     )
 
+                if item.task_name not in self._app_task_names:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Task '{item.task_name}' is not exposed by this API",
+                    )
                 sig = self.celery_app.signature(
                     item.task_name,
                     args=item.args,
@@ -1159,6 +1342,8 @@ class CeleryFastAPIBridge:
             job = chain(*signatures)
             result = job.apply_async()
             task_ids = [r.id for r in result.children or []]
+            for item in payload.tasks:
+                self.metrics.inc("tasks_submitted_total", item.task_name)
 
             return BatchTaskResponse(
                 group_id=result.id,
@@ -1243,6 +1428,88 @@ class CeleryFastAPIBridge:
                 task_count=len(header_tasks),
                 status="PENDING",
             )
+
+        @router.get(
+            f"{self.prefix}/tasks/{{task_id}}/events",
+            tags=["task-status"],
+            summary="Stream task status (Server-Sent Events)",
+        )
+        async def stream_task_events(
+            task_id: str, request: Request
+        ) -> StreamingResponse:
+            """
+            Stream task status as Server-Sent Events.
+
+            Emits an ``status`` event every 0.5s until the task is ready. Unlike
+            the WebSocket endpoint this works through plain HTTP proxies and
+            ``EventSource`` clients.
+            """
+
+            async def events() -> Any:
+                while True:
+                    if await request.is_disconnected():
+                        break
+                    frame = await asyncio.to_thread(self._task_snapshot, task_id)
+                    yield f"event: status\ndata: {json.dumps(frame, default=str)}\n\n"
+                    if frame["ready"]:
+                        break
+                    await asyncio.sleep(0.5)
+
+            return StreamingResponse(
+                events(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+
+        @router.get(
+            f"{self.prefix}/schedules",
+            tags=["schedules"],
+            summary="List Celery Beat schedules (read-only)",
+        )
+        def list_schedules() -> dict[str, Any]:
+            """List ``beat_schedule`` entries that target tasks exposed by this API."""
+            schedule = self.celery_app.conf.beat_schedule or {}
+            entries: list[dict[str, Any]] = []
+            for entry_name, entry in sorted(schedule.items()):
+                task = entry.get("task")
+                if task not in self._app_task_names:
+                    continue
+                entries.append(
+                    {
+                        "name": entry_name,
+                        "task": self.name_mapping.get(task, task),
+                        "schedule": str(entry.get("schedule")),
+                        "args": list(entry.get("args") or []),
+                        "kwargs": dict(entry.get("kwargs") or {}),
+                        "options": dict(entry.get("options") or {}),
+                    }
+                )
+            return {"count": len(entries), "schedules": entries}
+
+        if self.enable_metrics:
+
+            @router.get(
+                f"{self.prefix}/metrics",
+                tags=["observability"],
+                summary="Prometheus metrics",
+                response_class=PlainTextResponse,
+            )
+            def metrics_endpoint() -> PlainTextResponse:
+                """Prometheus text-format metrics for this API and its broker."""
+                gauges: dict[str, float] = {"broker_up": 0.0}
+                try:
+                    ping = self.celery_app.control.inspect(timeout=1.0).ping() or {}
+                    gauges["broker_up"] = 1.0
+                    gauges["workers_online"] = float(len(ping))
+                except Exception:  # noqa: BLE001
+                    pass
+                return PlainTextResponse(
+                    self.metrics.render(gauges),
+                    media_type="text/plain; version=0.0.4; charset=utf-8",
+                )
+
+        if self.enable_mcp:
+            self._register_mcp(router)
 
         def _find_local_worker() -> str | None:
             """
@@ -1463,7 +1730,7 @@ class CeleryFastAPIBridge:
             summary="Trigger any task",
         )
         def trigger_generic_task(
-            request: Request, payload: GenericTaskPayload
+            request: Request, response: Response, payload: GenericTaskPayload
         ) -> TaskResponse:
             """
             Trigger any Celery task by name.
@@ -1479,6 +1746,13 @@ class CeleryFastAPIBridge:
             Note: queue is required - you must specify which queue to send the task to.
             """
             self._check_rate_limit(request)
+
+            fingerprint = payload.model_dump_json()
+            replay = self._idempotent_lookup(
+                request, response, f"trigger:{payload.task_name}", fingerprint
+            )
+            if replay is not None:
+                return replay
 
             # Build send_task options - queue is required in GenericTaskPayload
             send_options: dict[str, Any] = {
@@ -1519,8 +1793,12 @@ class CeleryFastAPIBridge:
             if payload.soft_time_limit is not None:
                 send_options["soft_time_limit"] = payload.soft_time_limit
 
-            result = self.celery_app.send_task(payload.task_name, **send_options)
-            return TaskResponse(task_id=result.id, status="PENDING")
+            result = self._dispatch(payload.task_name, send_options)
+            task_response = TaskResponse(task_id=result.id, status="PENDING")
+            self._idempotent_save(
+                request, f"trigger:{payload.task_name}", fingerprint, task_response
+            )
+            return task_response
 
         @router.post(
             f"{self.prefix}/tasks/batch",
@@ -1597,6 +1875,133 @@ class CeleryFastAPIBridge:
                 self.celery_app.control.revoke(task_id)
 
             return {"status": "revoked", "task_ids": task_ids, "count": len(task_ids)}
+
+    def _mcp_tools(self) -> dict[str, tuple[str, dict[str, Any]]]:
+        """Map public tool name -> (internal task name, JSON input schema)."""
+        option_names = set(CELERY_OPTIONS_FIELDS)
+        tools: dict[str, tuple[str, dict[str, Any]]] = {}
+        for task_name in sorted(self._app_task_names):
+            model = self._task_models.get(task_name)
+            if model is None:
+                continue
+            schema = model.model_json_schema()
+            props = {
+                k: v
+                for k, v in schema.get("properties", {}).items()
+                if k not in option_names
+            }
+            schema["properties"] = props
+            schema["required"] = [r for r in schema.get("required", []) if r in props]
+            schema.pop("title", None)
+            tools[self.name_mapping.get(task_name, task_name)] = (task_name, schema)
+        return tools
+
+    def _register_mcp(self, router: _RouteGroup) -> None:
+        """Expose tasks as MCP tools over a minimal JSON-RPC HTTP endpoint."""
+        status_tool = "get_task_status"
+
+        @router.post(
+            f"{self.prefix}/mcp",
+            tags=["mcp"],
+            summary="Model Context Protocol endpoint (experimental)",
+        )
+        def mcp_endpoint(request: Request, body: dict[str, Any]) -> Response:
+            """Minimal MCP server: ``initialize``, ``tools/list`` and ``tools/call``."""
+            method = body.get("method")
+            rpc_id = body.get("id")
+            if rpc_id is None:  # notification (e.g. notifications/initialized)
+                return Response(status_code=202)
+
+            def reply(result: Any) -> JSONResponse:
+                return JSONResponse({"jsonrpc": "2.0", "id": rpc_id, "result": result})
+
+            def error(code: int, message: str) -> JSONResponse:
+                return JSONResponse(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": rpc_id,
+                        "error": {"code": code, "message": message},
+                    }
+                )
+
+            def tool_result(payload: Any, is_error: bool = False) -> JSONResponse:
+                return reply(
+                    {
+                        "content": [
+                            {"type": "text", "text": json.dumps(payload, default=str)}
+                        ],
+                        "isError": is_error,
+                    }
+                )
+
+            params = body.get("params") or {}
+            if method == "initialize":
+                return reply(
+                    {
+                        "protocolVersion": params.get("protocolVersion", "2025-03-26"),
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {"name": "celery-fastapi", "version": "0.1.6"},
+                    }
+                )
+            if method == "ping":
+                return reply({})
+
+            tools = self._mcp_tools()
+            if method == "tools/list":
+                listed = [
+                    {
+                        "name": public,
+                        "description": f"Submit Celery task '{internal}' (async).",
+                        "inputSchema": schema,
+                    }
+                    for public, (internal, schema) in tools.items()
+                ]
+                listed.append(
+                    {
+                        "name": status_tool,
+                        "description": "Get the state and result of a submitted task.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {"task_id": {"type": "string"}},
+                            "required": ["task_id"],
+                        },
+                    }
+                )
+                return reply({"tools": listed})
+
+            if method == "tools/call":
+                tool = params.get("name")
+                arguments = params.get("arguments") or {}
+                if tool == status_tool:
+                    task_id = arguments.get("task_id")
+                    if not isinstance(task_id, str) or not task_id:
+                        return tool_result({"error": "task_id is required"}, True)
+                    return tool_result(self._task_snapshot(task_id))
+                if tool not in tools:
+                    return error(-32602, f"Unknown tool: {tool}")
+                self._check_rate_limit(request)
+                internal, _schema = tools[tool]
+                model = self._task_models[internal]
+                try:
+                    payload = model.model_validate(arguments)
+                except Exception as exc:  # noqa: BLE001
+                    return tool_result({"error": str(exc)}, True)
+                queue = getattr(self.celery_app.tasks.get(internal), "queue", None) or (
+                    self.celery_app.conf.task_default_queue or "celery"
+                )
+                send_options = self._build_send_options(payload, queue)
+                for hook in self.pre_hooks:
+                    hook(payload)
+                try:
+                    result = self._dispatch(internal, send_options)
+                except Exception as exc:  # noqa: BLE001
+                    return tool_result({"error": str(exc)}, True)
+                task_response = TaskResponse(task_id=result.id, status="PENDING")
+                for hook in self.post_hooks:
+                    hook(task_response)
+                return tool_result(task_response.model_dump())
+
+            return error(-32601, f"Method not found: {method}")
 
     def get_registered_routes(self) -> list[dict[str, str]]:
         """

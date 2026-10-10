@@ -98,6 +98,10 @@ def create_app(
     enable_admin_endpoints: bool = False,
     api_key: str | None = None,
     api_key_header: str = "X-API-Key",
+    enable_metrics: bool = False,
+    enable_mcp: bool = False,
+    enable_tracing: bool = False,
+    idempotency_ttl: float = 86400.0,
 ) -> FastAPI:
     """
     Create a FastAPI application with Celery task endpoints.
@@ -168,6 +172,10 @@ def create_app(
         enable_admin_endpoints=enable_admin_endpoints,
         api_key=api_key,
         api_key_header=api_key_header,
+        enable_metrics=enable_metrics,
+        enable_mcp=enable_mcp,
+        enable_tracing=enable_tracing,
+        idempotency_ttl=idempotency_ttl,
     )
 
     # Register all routes

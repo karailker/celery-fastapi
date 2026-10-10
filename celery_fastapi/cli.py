@@ -71,6 +71,37 @@ app = typer.Typer(
 console = Console()
 
 
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _feature_kwargs(
+    enable_admin: bool, api_key: str | None, metrics: bool, mcp: bool
+) -> dict[str, Any]:
+    """Keyword arguments for ``create_app`` derived from the CLI feature flags."""
+    return {
+        "enable_admin_endpoints": enable_admin,
+        "api_key": api_key,
+        "enable_metrics": metrics,
+        "enable_mcp": mcp,
+    }
+
+
+def _export_feature_env(
+    enable_admin: bool, api_key: str | None, metrics: bool, mcp: bool
+) -> None:
+    """Pass feature flags to worker processes that rebuild the app from env."""
+    for name, on in (
+        ("CELERY_FASTAPI_ENABLE_ADMIN", enable_admin),
+        ("CELERY_FASTAPI_METRICS", metrics),
+        ("CELERY_FASTAPI_MCP", mcp),
+    ):
+        if on:
+            os.environ[name] = "1"
+    if api_key:
+        os.environ["CELERY_FASTAPI_API_KEY"] = api_key
+
+
 def _create_app_from_env() -> Any:
     """
     Factory function to create FastAPI app from environment variables.
@@ -92,6 +123,12 @@ def _create_app_from_env() -> Any:
         title="Celery FastAPI",
         prefix=prefix,
         fastapi_kwargs={"root_path": root_path} if root_path else None,
+        **_feature_kwargs(
+            _env_flag("CELERY_FASTAPI_ENABLE_ADMIN"),
+            os.environ.get("CELERY_FASTAPI_API_KEY") or None,
+            _env_flag("CELERY_FASTAPI_METRICS"),
+            _env_flag("CELERY_FASTAPI_MCP"),
+        ),
     )
 
 
@@ -252,6 +289,40 @@ def serve(
         str,
         typer.Option("--prefix", help="URL prefix for all endpoints"),
     ] = "",
+    # Security & feature options
+    enable_admin: Annotated[
+        bool,
+        typer.Option(
+            "--enable-admin",
+            envvar="CELERY_FASTAPI_ENABLE_ADMIN",
+            help="Expose /purge, /trigger and task revocation endpoints",
+        ),
+    ] = False,
+    api_key: Annotated[
+        str | None,
+        typer.Option(
+            "--api-key",
+            envvar="CELERY_FASTAPI_API_KEY",
+            help="Require this key in the X-API-Key header "
+            "(prefer the env var: arguments show up in process lists)",
+        ),
+    ] = None,
+    metrics: Annotated[
+        bool,
+        typer.Option(
+            "--metrics",
+            envvar="CELERY_FASTAPI_METRICS",
+            help="Expose Prometheus metrics at /metrics",
+        ),
+    ] = False,
+    mcp: Annotated[
+        bool,
+        typer.Option(
+            "--mcp",
+            envvar="CELERY_FASTAPI_MCP",
+            help="Expose tasks as MCP tools at /mcp (experimental)",
+        ),
+    ] = False,
     # Root path for proxied setups
     root_path: Annotated[
         str,
@@ -315,6 +386,7 @@ def serve(
         title=f"Celery FastAPI - {celery_instance.main}",
         prefix=prefix,
         fastapi_kwargs={"root_path": root_path} if root_path else None,
+        **_feature_kwargs(enable_admin, api_key, metrics, mcp),
     )
 
     # Show registered routes
@@ -402,6 +474,7 @@ def serve(
         # Set environment variables for the factory to use
         os.environ["CELERY_FASTAPI_CELERY_APP"] = celery_app
         os.environ["CELERY_FASTAPI_PREFIX"] = prefix
+        _export_feature_env(enable_admin, api_key, metrics, mcp)
         if root_path:
             os.environ["CELERY_FASTAPI_ROOT_PATH"] = root_path
 
@@ -548,6 +621,40 @@ def serve_gunicorn(
         str,
         typer.Option("--prefix", help="URL prefix for all endpoints"),
     ] = "",
+    # Security & feature options
+    enable_admin: Annotated[
+        bool,
+        typer.Option(
+            "--enable-admin",
+            envvar="CELERY_FASTAPI_ENABLE_ADMIN",
+            help="Expose /purge, /trigger and task revocation endpoints",
+        ),
+    ] = False,
+    api_key: Annotated[
+        str | None,
+        typer.Option(
+            "--api-key",
+            envvar="CELERY_FASTAPI_API_KEY",
+            help="Require this key in the X-API-Key header "
+            "(prefer the env var: arguments show up in process lists)",
+        ),
+    ] = None,
+    metrics: Annotated[
+        bool,
+        typer.Option(
+            "--metrics",
+            envvar="CELERY_FASTAPI_METRICS",
+            help="Expose Prometheus metrics at /metrics",
+        ),
+    ] = False,
+    mcp: Annotated[
+        bool,
+        typer.Option(
+            "--mcp",
+            envvar="CELERY_FASTAPI_MCP",
+            help="Expose tasks as MCP tools at /mcp (experimental)",
+        ),
+    ] = False,
 ) -> None:
     """
     Start the FastAPI server using Gunicorn with uvicorn workers.
@@ -592,6 +699,7 @@ def serve_gunicorn(
         celery_instance,
         title=f"Celery FastAPI - {celery_instance.main}",
         prefix=prefix,
+        **_feature_kwargs(enable_admin, api_key, metrics, mcp),
     )
 
     # Show registered routes
@@ -664,6 +772,40 @@ def routes(
         str,
         typer.Option("--prefix", help="URL prefix for all endpoints"),
     ] = "",
+    # Security & feature options
+    enable_admin: Annotated[
+        bool,
+        typer.Option(
+            "--enable-admin",
+            envvar="CELERY_FASTAPI_ENABLE_ADMIN",
+            help="Expose /purge, /trigger and task revocation endpoints",
+        ),
+    ] = False,
+    api_key: Annotated[
+        str | None,
+        typer.Option(
+            "--api-key",
+            envvar="CELERY_FASTAPI_API_KEY",
+            help="Require this key in the X-API-Key header "
+            "(prefer the env var: arguments show up in process lists)",
+        ),
+    ] = None,
+    metrics: Annotated[
+        bool,
+        typer.Option(
+            "--metrics",
+            envvar="CELERY_FASTAPI_METRICS",
+            help="Expose Prometheus metrics at /metrics",
+        ),
+    ] = False,
+    mcp: Annotated[
+        bool,
+        typer.Option(
+            "--mcp",
+            envvar="CELERY_FASTAPI_MCP",
+            help="Expose tasks as MCP tools at /mcp (experimental)",
+        ),
+    ] = False,
 ) -> None:
     """
     List all routes that would be generated for the Celery app.
@@ -679,7 +821,11 @@ def routes(
         console.print(f"[red]Error loading Celery app:[/] {e}")
         raise typer.Exit(1)
 
-    fastapi_app = create_app(celery_instance, prefix=prefix)
+    fastapi_app = create_app(
+        celery_instance,
+        prefix=prefix,
+        **_feature_kwargs(enable_admin, api_key, metrics, mcp),
+    )
     bridge = fastapi_app.state.celery_bridge
     routes_list = bridge.get_registered_routes()
 
@@ -740,6 +886,86 @@ def tasks(
     else:
         console.print(table)
         console.print(f"\n[dim]Total tasks: {task_count}[/]")
+
+
+@app.command()
+def openapi(
+    celery_app: Annotated[
+        str,
+        typer.Argument(help="Path to Celery app (e.g., 'myapp.celery:app')"),
+    ],
+    prefix: Annotated[
+        str,
+        typer.Option("--prefix", help="URL prefix for all endpoints"),
+    ] = "",
+    # Security & feature options
+    enable_admin: Annotated[
+        bool,
+        typer.Option(
+            "--enable-admin",
+            envvar="CELERY_FASTAPI_ENABLE_ADMIN",
+            help="Expose /purge, /trigger and task revocation endpoints",
+        ),
+    ] = False,
+    api_key: Annotated[
+        str | None,
+        typer.Option(
+            "--api-key",
+            envvar="CELERY_FASTAPI_API_KEY",
+            help="Require this key in the X-API-Key header "
+            "(prefer the env var: arguments show up in process lists)",
+        ),
+    ] = None,
+    metrics: Annotated[
+        bool,
+        typer.Option(
+            "--metrics",
+            envvar="CELERY_FASTAPI_METRICS",
+            help="Expose Prometheus metrics at /metrics",
+        ),
+    ] = False,
+    mcp: Annotated[
+        bool,
+        typer.Option(
+            "--mcp",
+            envvar="CELERY_FASTAPI_MCP",
+            help="Expose tasks as MCP tools at /mcp (experimental)",
+        ),
+    ] = False,
+    output: Annotated[
+        str | None,
+        typer.Option("--output", "-o", help="Write the schema to this file"),
+    ] = None,
+) -> None:
+    """
+    Print the OpenAPI schema without starting a server.
+
+    Useful for client generation in CI, for example:
+        celery-fastapi openapi myapp.celery:app -o openapi.json
+        openapi-generator-cli generate -i openapi.json -g typescript-fetch -o client
+    """
+    import json
+
+    from celery_fastapi.app import create_app, load_celery_app
+
+    try:
+        celery_instance = load_celery_app(celery_app)
+    except Exception as e:
+        console.print(f"[red]Error loading Celery app:[/] {e}")
+        raise typer.Exit(1)
+
+    fastapi_app = create_app(
+        celery_instance,
+        prefix=prefix,
+        **_feature_kwargs(enable_admin, api_key, metrics, mcp),
+    )
+    schema = json.dumps(fastapi_app.openapi(), indent=2)
+    if output:
+        with open(output, "w", encoding="utf-8") as fh:
+            fh.write(schema + "\n")
+        console.print(f"[green]✓[/] Wrote OpenAPI schema to {output}")
+    else:
+        typer.echo(schema)
 
 
 @app.command()

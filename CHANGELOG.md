@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Python 3.14, 3.15 and 3.16 support. 3.14 is tested in CI; 3.15 (beta) and 3.16 (pre-release) run as non-blocking CI jobs until they are released.
+- Python 3.14, 3.15 and 3.16 support. 3.14 is tested in CI; 3.15 (release candidate) and 3.16 run as non-blocking CI jobs, and 3.16 joins the matrix automatically once `setup-python` can install it.
 - Tests for CLI commands, app loading, gunicorn integration, health/ping discovery and rate limiting (coverage 52% -> 77%).
 - Pydantic task parameter support: `_create_task_payload_model` now directly uses BaseModel subclasses for type-hinted task parameters.
 - Pluggable rate limiting: Introduced `BaseRateLimitStorage` with `InMemoryRateLimitStorage` and optional `RedisRateLimitStorage`.

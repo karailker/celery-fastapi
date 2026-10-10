@@ -55,21 +55,37 @@ jobs:
       - name: Run mypy
         run: poetry run mypy celery_fastapi
 
+  python-matrix:
+    # Pre-release interpreters join the matrix only once setup-python can
+    # install them, so an unpublished version never turns CI red.
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+    steps:
+      - name: Build Python test matrix
+        id: build
+        run: |
+          manifest=$(curl -fsSL https://raw.githubusercontent.com/actions/python-versions/main/versions-manifest.json || echo '[]')
+          include='[]'
+          for v in 3.15 3.16; do
+            if echo "$manifest" | jq -e --arg v "$v" 'any(.[]; .version | startswith($v + "."))' >/dev/null; then
+              include=$(echo "$include" | jq -c --arg v "$v" '. + [{"python-version": $v, "experimental": true}]')
+            else
+              echo "::notice::Python $v is not published yet; skipping its test job"
+            fi
+          done
+          matrix=$(jq -nc --argjson inc "$include" '{"python-version":["3.11","3.12","3.13","3.14"],"experimental":[false],"include":$inc}')
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
   test:
     name: test (${{ matrix.python-version }})
+    needs: python-matrix
     runs-on: ubuntu-latest
-    # Pre-release interpreters (beta / not yet released) must not block merges.
+    # Pre-release interpreters must not block merges.
     continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
-      matrix:
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
-        experimental: [false]
-        include:
-          - python-version: "3.15"
-            experimental: true
-          - python-version: "3.16"
-            experimental: true
+      matrix: ${{ fromJSON(needs.python-matrix.outputs.matrix) }}
 
     steps:
       - uses: actions/checkout@v4

@@ -39,9 +39,8 @@ def test_batch_add_tasks() -> None:
         },
     )
 
-    assert response.status_code == 200, (
-        f"Expected 200, got {response.status_code}: {response.text}"
-    )
+    msg = f"Expected 200, got {response.status_code}: {response.text}"
+    assert response.status_code == 200, msg
     data = response.json()
     assert "group_id" in data
     assert len(data["task_ids"]) == len(batch_data)

@@ -516,7 +516,7 @@ class RedisIdempotencyStorage:
             stored_fp = data.get("fp")
             if stored_fp != fingerprint:
                 return None, True
-            
+
             resp_data = data.get("resp")
             return TaskResponse(**resp_data), False
         except Exception:
@@ -1500,7 +1500,7 @@ class CeleryFastAPIBridge:
                 import inspect
                 task = self.celery_app.tasks.get(item.task_name)
                 task_func = getattr(task, "run", None)
-                
+
                 combined_dict = {**(item.kwargs or {})}
                 if task_func:
                     sig = inspect.signature(task_func)
@@ -1508,7 +1508,7 @@ class CeleryFastAPIBridge:
                     for idx, arg in enumerate(item.args or []):
                         if idx < len(params):
                             combined_dict[params[idx].name] = arg
-                
+
                 # Merge in Celery operation options
                 combined_dict.update({
                     "queue": item.queue,

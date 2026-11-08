@@ -1,5 +1,6 @@
 FROM python:3.12-slim
 
 WORKDIR /app
+RUN pip install --no-cache-dir packaging
 RUN pip install --no-cache-dir "celery-fastapi[cli,redis]"
 COPY tasks.py .

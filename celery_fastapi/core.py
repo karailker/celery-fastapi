@@ -522,7 +522,7 @@ class RedisIdempotencyStorage:
         except Exception:
             return None, False
 
-    def save(self, key: str, fingerprint: str, response: "TaskResponse"):
+    def save(self, key: str, fingerprint: str, response: "TaskResponse") -> None:
         zkey = self._zkey(key)
         payload = json.dumps({
             "fp": fingerprint,
@@ -627,7 +627,7 @@ class IdempotencyStore:
     def fingerprint(*parts: str) -> str:
         return hashlib.sha256("\x00".join(parts).encode()).hexdigest()
 
-    def lookup(self, key: str, fingerprint: str) -> "TaskResponse | None":
+    def lookup(self, key: str, fingerprint: str) -> TaskResponse | None:
         if self._backend:
             res, conflict = self._backend.lookup(key, fingerprint)
             if conflict:
@@ -635,8 +635,7 @@ class IdempotencyStore:
                     status_code=409,
                     detail="Idempotency-Key was already used with a different request",
                 )
-            return res
-
+            return res  # type: ignore[no-any-return]
         now = time.monotonic()
         with self._lock:
             entry = self._items.get(key)
@@ -1118,13 +1117,24 @@ class CeleryFastAPIBridge:
             return None, f"could not find validation model for task '{item.task_name}'"
 
         try:
-            payload_dict = {
-                "args": item.args,
-                "kwargs": item.kwargs,
+            # bridge the Gap between Celery's (args, kwargs) and Pydantic's flat attributes.
+            import inspect
+            task = self.celery_app.tasks.get(item.task_name)
+            task_func = getattr(task, "run", None)
+
+            combined_dict = {**(item.kwargs or {})}
+            if task_func:
+                sig = inspect.signature(task_func)
+                params = list(sig.parameters.values())
+                for idx, arg in enumerate(item.args or []):
+                    if idx < len(params):
+                        combined_dict[params[idx].name] = arg
+
+            combined_dict.update({
                 "queue": item.queue,
                 "countdown": item.countdown,
-            }
-            cleaned_dict = {k: v for k, v in payload_dict.items() if v is not None}
+            })
+            cleaned_dict = {k: v for k, v in combined_dict.items() if v is not None}
             return model.model_validate(cleaned_dict), None
         except Exception as exc:
             return None, str(exc)
@@ -1155,7 +1165,7 @@ class CeleryFastAPIBridge:
                 Nothing: unknown/not-started tasks report state PENDING.
             """
             # Wrapped in to_thread to prevent blocking the main event loop
-            def fetch_status():
+            def fetch_status() -> dict[str, Any]:
                 result = AsyncResult(task_id, app=self.celery_app)
                 info: dict[str, Any] = {}
                 if hasattr(result, "info") and result.info:
@@ -1477,47 +1487,6 @@ class CeleryFastAPIBridge:
                 status="PENDING",
                 failures=failures or None,
             )
-
-        def _validate_batch_item(self, item: BatchTaskItem) -> tuple[Any, str | None]:
-            """
-            Validate a BatchTaskItem against the task's specific PayloadModel.
-
-            Returns:
-                (validated_payload, error_message)
-            """
-            if not item.task_name:
-                return None, "task_name is required"
-
-            if item.task_name not in self._app_task_names:
-                return None, f"task '{item.task_name}' is not registered or exposed by this API"
-
-            model = self._task_models.get(item.task_name)
-            if model is None:
-                return None, f"could not find validation model for task '{item.task_name}'"
-
-            try:
-                # We need to bridge the Gap between Celery's (args, kwargs) and Pydantic's flat attributes.
-                import inspect
-                task = self.celery_app.tasks.get(item.task_name)
-                task_func = getattr(task, "run", None)
-
-                combined_dict = {**(item.kwargs or {})}
-                if task_func:
-                    sig = inspect.signature(task_func)
-                    params = list(sig.parameters.values())
-                    for idx, arg in enumerate(item.args or []):
-                        if idx < len(params):
-                            combined_dict[params[idx].name] = arg
-
-                # Merge in Celery operation options
-                combined_dict.update({
-                    "queue": item.queue,
-                    "countdown": item.countdown,
-                })
-                cleaned_dict = {k: v for k, v in combined_dict.items() if v is not None}
-                return model.model_validate(cleaned_dict), None
-            except Exception as exc:
-                return None, str(exc)
 
         @router.post(
             f"{self.prefix}/tasks/chord",

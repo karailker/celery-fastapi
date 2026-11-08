@@ -375,10 +375,17 @@ class BatchTaskRequest(BaseModel):
 class BatchTaskResponse(BaseModel):
     """Response model for batch task submission."""
 
-    group_id: str = Field(description="Group ID for the submitted batch")
-    task_ids: list[str] = Field(description="Individual task IDs in the group")
-    task_count: int = Field(description="Number of tasks submitted")
+    group_id: str | None = Field(
+        default=None, description="Group ID for the submitted batch"
+    )
+    task_ids: list[str] = Field(
+        default_factory=list, description="Individual task IDs in the group"
+    )
+    task_count: int = Field(description="Number of successfully submitted tasks")
     status: str = Field(default="PENDING", description="Group status")
+    failures: list[dict[str, Any]] | None = Field(
+        default=None, description="List of tasks that failed validation"
+    )
 
 
 class HealthCheckResponse(BaseModel):
@@ -484,6 +491,47 @@ class RedisRateLimitStorage(BaseRateLimitStorage):
         self._client.zadd(self._zkey(key), {f"{now}:{key}:{self._next_seq()}": now})
 
 
+class RedisIdempotencyStorage:
+    """
+    Distributed idempotency storage backed by Redis.
+    """
+
+    def __init__(self, client: Any, ttl: float = 86400.0):
+        self._client = client
+        self._ttl = ttl
+        self._key_prefix = "celery_fastapi:idempotency:"
+
+    def _zkey(self, key: str) -> str:
+        return f"{self._key_prefix}{key}"
+
+    def lookup(self, key: str, fingerprint: str) -> tuple[TaskResponse | None, bool]:
+        """
+        Lookup a cached response.
+        Returns: (response, is_conflict)
+        is_conflict is True if the key exists but fingerprints differ.
+        """
+        zkey = self._zkey(key)
+        stored = self._client.get(zkey)
+        if not stored:
+            return None, False
+
+        try:
+            data = json.loads(stored)
+            stored_fp = data.get("fp")
+            if stored_fp != fingerprint:
+                return None, True
+
+            resp_data = data.get("resp")
+            return TaskResponse(**resp_data), False
+        except Exception:
+            return None, False
+
+    def save(self, key: str, fingerprint: str, response: "TaskResponse") -> None:
+        zkey = self._zkey(key)
+        payload = json.dumps({"fp": fingerprint, "resp": response.model_dump()})
+        self._client.setex(zkey, int(self._ttl), payload)
+
+
 class RateLimiter:
     """Sliding-window rate limiter backed by a pluggable storage.
 
@@ -559,11 +607,20 @@ class Metrics:
 
 
 class IdempotencyStore:
-    """In-memory ``Idempotency-Key`` store (best effort, single process)."""
+    """Plug-and-play Idempotency store. Defaults to in-memory.
 
-    def __init__(self, ttl: float = 86400.0, max_items: int = 10000) -> None:
+    Can be swapped with RedisIdempotencyStorage for distributed setups.
+    """
+
+    def __init__(
+        self,
+        ttl: float = 86400.0,
+        max_items: int = 10000,
+        backend: Any | None = None,
+    ) -> None:
         self.ttl = ttl
         self.max_items = max_items
+        self._backend = backend
         self._items: dict[str, tuple[float, str, TaskResponse]] = {}
         self._lock = threading.Lock()
 
@@ -571,7 +628,15 @@ class IdempotencyStore:
     def fingerprint(*parts: str) -> str:
         return hashlib.sha256("\x00".join(parts).encode()).hexdigest()
 
-    def lookup(self, key: str, fingerprint: str) -> "TaskResponse | None":
+    def lookup(self, key: str, fingerprint: str) -> TaskResponse | None:
+        if self._backend:
+            res, conflict = self._backend.lookup(key, fingerprint)
+            if conflict:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Idempotency-Key was already used with a different request",
+                )
+            return res  # type: ignore[no-any-return]
         now = time.monotonic()
         with self._lock:
             entry = self._items.get(key)
@@ -585,6 +650,10 @@ class IdempotencyStore:
             return entry[2]
 
     def save(self, key: str, fingerprint: str, response: "TaskResponse") -> None:
+        if self._backend:
+            self._backend.save(key, fingerprint, response)
+            return
+
         now = time.monotonic()
         with self._lock:
             self._items[key] = (now + self.ttl, fingerprint, response)
@@ -1031,6 +1100,69 @@ class CeleryFastAPIBridge:
             description=f"Submit '{task_name}' task for async execution.\n\nDefault queue: `{queue_name}`\n\nUse `_task_name` and `_queue` query params to override.",
         )(run_task)
 
+    def _validate_batch_item(self, item: BatchTaskItem) -> tuple[Any, str | None]:
+        """
+        Validate a BatchTaskItem against the task's specific PayloadModel.
+
+        Returns:
+            (validated_payload, error_message)
+        """
+        if not item.task_name:
+            return None, "task_name is required"
+
+        if item.task_name not in self._app_task_names:
+            return (
+                None,
+                f"task '{item.task_name}' is not registered or exposed by this API",
+            )
+
+        model = self._task_models.get(item.task_name)
+        if model is None:
+            return None, f"could not find validation model for task '{item.task_name}'"
+
+        try:
+            import inspect
+
+            task = self.celery_app.tasks.get(item.task_name)
+            task_func = getattr(task, "run", None)
+
+            combined_dict = {**(item.kwargs or {})}
+            if task_func:
+                sig = inspect.signature(task_func)
+                params = list(sig.parameters.values())
+
+                provided_args = item.args or []
+                for idx, arg in enumerate(provided_args):
+                    if idx < len(params):
+                        param = params[idx]
+                        if param.kind == inspect.Parameter.VAR_POSITIONAL:
+                            combined_dict[param.name] = provided_args[idx:]
+                            break
+                        combined_dict[param.name] = arg
+
+                if params and params[-1].kind == inspect.Parameter.VAR_POSITIONAL:
+                    var_arg_name = params[-1].name
+                    if var_arg_name not in combined_dict:
+                        pos_count = len(
+                            [
+                                p
+                                for p in params[:-1]
+                                if p.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD
+                            ]
+                        )
+                        combined_dict[var_arg_name] = provided_args[pos_count:]
+
+            combined_dict.update(
+                {
+                    "queue": item.queue,
+                    "countdown": item.countdown,
+                }
+            )
+            cleaned_dict = {k: v for k, v in combined_dict.items() if v is not None}
+            return model.model_validate(cleaned_dict), None
+        except Exception as exc:
+            return None, str(exc)
+
     def _register_status_endpoints(self) -> None:
         """Register task status, listing, and control endpoints."""
         # Protected: API key + user dependencies. Admin: protected + opt-in.
@@ -1047,7 +1179,7 @@ class CeleryFastAPIBridge:
             tags=["task-status"],
             summary="Get task status",
         )
-        def get_task_status(task_id: str) -> TaskStatusResponse:
+        async def get_task_status(task_id: str) -> TaskStatusResponse:
             """
             Get the status of a specific task by its ID.
 
@@ -1056,33 +1188,35 @@ class CeleryFastAPIBridge:
             Raises:
                 Nothing: unknown/not-started tasks report state PENDING.
             """
-            result = AsyncResult(task_id, app=self.celery_app)
 
-            # Celery reports PENDING for unknown *and* not-yet-started tasks;
-            # treat both as PENDING so freshly submitted tasks are queryable.
-            # Build info dict with additional metadata
-            info: dict[str, Any] = {}
-            if hasattr(result, "info") and result.info:
-                if isinstance(result.info, dict):
-                    info = result.info
-                elif isinstance(result.info, Exception):
-                    info = {"error": str(result.info)}
+            # Wrapped in to_thread to prevent blocking the main event loop
+            def fetch_status() -> dict[str, Any]:
+                result = AsyncResult(task_id, app=self.celery_app)
+                info: dict[str, Any] = {}
+                if hasattr(result, "info") and result.info:
+                    if isinstance(result.info, dict):
+                        info = result.info
+                    elif isinstance(result.info, Exception):
+                        info = {"error": str(result.info)}
 
-            return TaskStatusResponse(
-                task_id=task_id,
-                state=result.state,
-                result=result.result if result.ready() else None,
-                traceback=result.traceback,
-                date_done=result.date_done,
-                info=info if info else None,
-            )
+                return {
+                    "task_id": task_id,
+                    "state": result.state,
+                    "result": result.result if result.ready() else None,
+                    "traceback": result.traceback,
+                    "date_done": result.date_done,
+                    "info": info if info else None,
+                }
+
+            data = await asyncio.to_thread(fetch_status)
+            return TaskStatusResponse(**data)
 
         @admin.delete(
             f"{self.prefix}/tasks/{{task_id}}",
             tags=["task-status"],
             summary="Revoke a task",
         )
-        def revoke_task(
+        async def revoke_task(
             task_id: str,
             payload: TaskRevokePayload | None = None,
         ) -> dict[str, str]:
@@ -1097,7 +1231,8 @@ class CeleryFastAPIBridge:
                 Confirmation of revocation request.
             """
             payload = payload or TaskRevokePayload()
-            self.celery_app.control.revoke(
+            await asyncio.to_thread(
+                self.celery_app.control.revoke,
                 task_id,
                 terminate=payload.terminate,
                 signal=payload.signal,
@@ -1182,7 +1317,7 @@ class CeleryFastAPIBridge:
             tags=["task-status"],
             summary="List all tasks",
         )
-        def list_all_tasks(
+        async def list_all_tasks(
             worker: str | None = Query(
                 default=None, description="Only tasks on this worker"
             ),
@@ -1225,15 +1360,24 @@ class CeleryFastAPIBridge:
                         filtered[worker_name] = page
                 return filtered
 
+            # Offload blocking broker calls in parallel to reduce latency
+            results = await asyncio.gather(
+                asyncio.to_thread(inspector.active),
+                asyncio.to_thread(inspector.scheduled),
+                asyncio.to_thread(inspector.reserved),
+                asyncio.to_thread(inspector.revoked),
+            )
+            active, scheduled, reserved, revoked = results
+
             return TaskListResponse(
-                active=filter_tasks(inspector.active()),
-                scheduled=filter_tasks(inspector.scheduled()),
-                reserved=filter_tasks(inspector.reserved()),
+                active=filter_tasks(active),
+                scheduled=filter_tasks(scheduled),
+                reserved=filter_tasks(reserved),
                 revoked={
                     w: ids
-                    for w, ids in (inspector.revoked() or {}).items()
+                    for w, ids in (revoked or {}).items()
                     if worker is None or w == worker
-                },  # Revoked is just task IDs, can't filter by task name
+                },
             )
 
         @router.get(
@@ -1241,7 +1385,7 @@ class CeleryFastAPIBridge:
             tags=["workers"],
             summary="List workers",
         )
-        def list_workers() -> dict[str, Any]:
+        async def list_workers() -> dict[str, Any]:
             """
             Get information about Celery workers that can execute THIS app's tasks.
 
@@ -1249,8 +1393,13 @@ class CeleryFastAPIBridge:
             """
             inspector = self.celery_app.control.inspect()
 
+            # Offload blocking broker calls
+            registered = await asyncio.to_thread(inspector.registered) or {}
+            ping = await asyncio.to_thread(inspector.ping) or {}
+            stats = await asyncio.to_thread(inspector.stats) or {}
+            active_queues = await asyncio.to_thread(inspector.active_queues) or {}
+
             # Filter registered tasks to only show this app's tasks
-            registered = inspector.registered() or {}
             filtered_registered: dict[str, list[str]] = {}
             for worker, tasks in registered.items():
                 filtered_tasks = [t for t in tasks if t in self._app_task_names]
@@ -1258,10 +1407,10 @@ class CeleryFastAPIBridge:
                     filtered_registered[worker] = filtered_tasks
 
             return {
-                "ping": inspector.ping() or {},
-                "stats": inspector.stats() or {},
+                "ping": ping,
+                "stats": stats,
                 "registered": filtered_registered,
-                "active_queues": inspector.active_queues() or {},
+                "active_queues": active_queues,
             }
 
         @router.get(
@@ -1312,61 +1461,71 @@ class CeleryFastAPIBridge:
             summary="Execute tasks in a chain",
             description="Execute multiple Celery tasks sequentially. Tasks are executed one after another, with the result of one task passed to the next.",
         )
-        def chain_tasks(
-            request: Request, payload: BatchTaskRequest
-        ) -> BatchTaskResponse:
+        def chain_tasks(request: Request, payload: dict[str, Any]) -> BatchTaskResponse:
             """Execute tasks in a chain.
 
             Args:
-                payload: BatchTaskRequest containing a list of tasks.
+                payload: Dictionary containing 'tasks' list.
 
             Returns:
                 BatchTaskResponse with group ID and individual task IDs.
             """
             from celery import chain
 
+            from celery_fastapi.core import BatchTaskRequest
+
             self._check_rate_limit(request)
 
-            if not payload.tasks:
+            try:
+                req = BatchTaskRequest.model_validate(payload)
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=422, detail=f"Invalid request body: {str(exc)}"
+                )
+
+            if not req.tasks:
                 raise HTTPException(status_code=422, detail="No tasks provided")
 
-            signatures = []
-            for item in payload.tasks:
-                if not item.task_name:
-                    raise HTTPException(
-                        status_code=422, detail="task_name is required for each task"
-                    )
-
+            # Unexposed tasks are a security error, not a per-item validation failure.
+            for item in req.tasks:
                 if item.task_name not in self._app_task_names:
                     raise HTTPException(
                         status_code=404,
                         detail=f"task '{item.task_name}' is not registered in this app",
                     )
 
-                if item.task_name not in self._app_task_names:
-                    raise HTTPException(
-                        status_code=404,
-                        detail=f"Task '{item.task_name}' is not exposed by this API",
-                    )
-                sig = self.celery_app.signature(
-                    item.task_name,
-                    args=item.args,
-                    kwargs=item.kwargs,
-                    queue=item.queue,
-                )
+            signatures = []
+            failures = []
+            for i, item in enumerate(req.tasks):
+                validated, err = self._validate_batch_item(item)
+                if err:
+                    failures.append({"index": i, "task": item.task_name, "error": err})
+                    continue
+
+                queue = getattr(
+                    self.celery_app.tasks.get(item.task_name), "queue", None
+                ) or (self.celery_app.conf.task_default_queue or "celery")
+                opts = self._build_send_options(validated, queue)
+                sig = self.celery_app.signature(item.task_name, **opts)
                 signatures.append(sig)
 
-            job = chain(*signatures)
-            result = job.apply_async()
-            task_ids = [r.id for r in result.children or []]
-            for item in payload.tasks:
-                self.metrics.inc("tasks_submitted_total", item.task_name)
+            if failures and not signatures:
+                raise HTTPException(status_code=422, detail={"failures": failures})
+
+            job = chain(*signatures) if signatures else None
+            result = job.apply_async() if job else None
+            task_ids = [r.id for r in result.children or []] if result else []
+
+            for item in req.tasks:
+                if item.task_name in self._app_task_names:
+                    self.metrics.inc("tasks_submitted_total", item.task_name)
 
             return BatchTaskResponse(
-                group_id=result.id,
+                group_id=result.id if result else None,
                 task_ids=task_ids,
-                task_count=len(payload.tasks),
+                task_count=len(signatures),
                 status="PENDING",
+                failures=failures or None,
             )
 
         @router.post(
@@ -1390,10 +1549,10 @@ class CeleryFastAPIBridge:
 
             self._check_rate_limit(request)
 
-            header_tasks = payload.get("header")
+            header_data = payload.get("header")
             callback_task_name = payload.get("callback")
 
-            if not header_tasks or not callback_task_name:
+            if not header_data or not callback_task_name:
                 raise HTTPException(
                     status_code=422,
                     detail="'header' and 'callback' are required for chord",
@@ -1406,44 +1565,70 @@ class CeleryFastAPIBridge:
                 )
 
             header_signatures = []
-            for item in header_tasks:
-                if not item.get("task_name"):
-                    raise HTTPException(
-                        status_code=422,
-                        detail="task_name is required for each task in header",
-                    )
+            failures = []
+            for i, item in enumerate(header_data):
+                # Ensure item is treated as a BatchTaskItem for consistency
+                if not isinstance(item, BatchTaskItem):
+                    try:
+                        item_obj = BatchTaskItem.model_validate(item)
+                    except Exception as exc:
+                        failures.append({"index": i, "error": str(exc)})
+                        continue
+                else:
+                    item_obj = item
 
-                if item["task_name"] not in self._app_task_names:
+                if item_obj.task_name not in self._app_task_names:
                     raise HTTPException(
                         status_code=404,
-                        detail=f"task '{item['task_name']}' is not registered in this app",
+                        detail=f"task '{item_obj.task_name}' is not registered in this app",
                     )
 
-                sig = self.celery_app.signature(
-                    item["task_name"],
-                    args=item.get("args", []),
-                    kwargs=item.get("kwargs", {}),
-                    queue=item.get("queue"),
-                )
+                validated, err = self._validate_batch_item(item_obj)
+                if err:
+                    failures.append(
+                        {"index": i, "task": item_obj.task_name, "error": err}
+                    )
+                    continue
+
+                queue = getattr(
+                    self.celery_app.tasks.get(item_obj.task_name), "queue", None
+                ) or (self.celery_app.conf.task_default_queue or "celery")
+                opts = self._build_send_options(validated, queue)
+                sig = self.celery_app.signature(item_obj.task_name, **opts)
                 header_signatures.append(sig)
+
+            if failures and not header_signatures:
+                raise HTTPException(status_code=422, detail={"failures": failures})
 
             callback_sig = self.celery_app.signature(callback_task_name)
 
             # chord syntax: chord(header)(callback).apply_async()
-            job = chord(header_signatures, body=callback_sig)
-            result = job.apply_async()
+            job = (
+                chord(header_signatures, body=callback_sig)
+                if header_signatures
+                else None
+            )
+            result = job.apply_async() if job else None
 
-            # For chord, the header group task IDs are available via result.parent.children
-            # if we have the parent. But apply_async returns the callback result.
             task_ids = []
-            if result.parent and result.parent.children:
+            if result and result.parent and result.parent.children:
                 task_ids = [r.id for r in result.parent.children]
 
+            for item in header_data:
+                tn = (
+                    item.get("task_name")
+                    if isinstance(item, dict)
+                    else getattr(item, "task_name", None)
+                )
+                if tn in self._app_task_names:
+                    self.metrics.inc("tasks_submitted_total", tn)
+
             return BatchTaskResponse(
-                group_id=result.id,
+                group_id=result.id if result else None,
                 task_ids=task_ids,
-                task_count=len(header_tasks),
+                task_count=len(header_signatures),
                 status="PENDING",
+                failures=failures or None,
             )
 
         @router.get(
@@ -1735,9 +1920,9 @@ class CeleryFastAPIBridge:
             tags=["workers"],
             summary="Purge all tasks",
         )
-        def purge_tasks() -> dict[str, int]:
+        async def purge_tasks() -> dict[str, int]:
             """Purge all pending tasks from the queue."""
-            count = self.celery_app.control.purge()
+            count = await asyncio.to_thread(self.celery_app.control.purge)
             return {"purged": count or 0}
 
         @admin.post(
@@ -1844,39 +2029,48 @@ class CeleryFastAPIBridge:
             if not payload.tasks:
                 raise HTTPException(status_code=422, detail="No tasks provided")
 
-            # Build Celery signatures for each task
-            signatures = []
+            # Unexposed tasks are a security error, not a per-item validation failure.
             for item in payload.tasks:
-                if not item.task_name:
-                    raise HTTPException(
-                        status_code=422, detail="task_name is required for each task"
-                    )
                 if item.task_name not in self._app_task_names:
                     raise HTTPException(
                         status_code=404,
-                        detail=f"Task '{item.task_name}' is not exposed by this API",
+                        detail=f"task '{item.task_name}' is not registered in this app",
                     )
-                sig = self.celery_app.signature(
-                    item.task_name,
-                    args=item.args,
-                    kwargs=item.kwargs,
-                    queue=item.queue,
-                )
+
+            # Build Celery signatures for each task
+            signatures = []
+            failures = []
+            for i, item in enumerate(payload.tasks):
+                validated, err = self._validate_batch_item(item)
+                if err:
+                    failures.append({"index": i, "task": item.task_name, "error": err})
+                    continue
+
+                queue = getattr(
+                    self.celery_app.tasks.get(item.task_name), "queue", None
+                ) or (self.celery_app.conf.task_default_queue or "celery")
+                opts = self._build_send_options(validated, queue)
+                sig = self.celery_app.signature(item.task_name, **opts)
                 signatures.append(sig)
 
-            # Submit the group
-            job = group(*signatures)
-            result = job.apply_async()
+            if failures and not signatures:
+                raise HTTPException(status_code=422, detail={"failures": failures})
 
-            task_ids = [r.id for r in result.children or []]
+            # Submit the group
+            job = group(*signatures) if signatures else None
+            result = job.apply_async() if job else None
+
+            task_ids = [r.id for r in result.children or []] if result else []
             for item in payload.tasks:
-                self.metrics.inc("tasks_submitted_total", item.task_name)
+                if item.task_name in self._app_task_names:
+                    self.metrics.inc("tasks_submitted_total", item.task_name)
 
             return BatchTaskResponse(
-                group_id=result.id,
+                group_id=result.id if result else None,
                 task_ids=task_ids,
-                task_count=len(payload.tasks),
+                task_count=len(signatures),
                 status="PENDING",
+                failures=failures or None,
             )
 
         @admin.post(

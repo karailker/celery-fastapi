@@ -96,11 +96,26 @@ jobs:
           python-version: ${{ matrix.python-version }}
           allow-prereleases: true
 
+      # Pre-release interpreters cannot install Poetry itself (no wheels yet),
+      # so install Poetry with the stable interpreter, then switch back.
+      - name: Set up stable Python for Poetry
+        if: matrix.experimental
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
       - name: Install Poetry
         uses: snok/install-poetry@v1
         with:
           virtualenvs-create: true
           virtualenvs-in-project: true
+
+      - name: Set up Python ${{ matrix.python-version }}
+        if: matrix.experimental
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          allow-prereleases: true
 
       - name: Load cached venv
         id: cached-poetry-dependencies

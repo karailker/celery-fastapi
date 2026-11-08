@@ -159,7 +159,7 @@ def test_dispatch_queues_to_broker(
     fa = create_app(app)
     client = TestClient(fa)
     resp = client.post(f"/{name}/add", json={"x": 1, "y": 2})
-    assert resp.status_code == 200
+    assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["status"] == "PENDING"
     assert "task_id" in body

@@ -37,8 +37,8 @@ plain Celery.
 - 🔄 **Queue-aware routing** — Respects Celery queue assignments
 - 📝 **OpenAPI documentation** — Full Swagger/ReDoc support
 - ⚡ **Full Celery options** — All task options (countdown, eta, priority, etc.)
-- 🧮 **Batch execution** — Submit groups of tasks in a single request via `/tasks/batch`
-- 🔗 **Workflow primitives** — Chain and chord orchestration via `/tasks/chain` and `/tasks/chord`
+- 🧮 **Batch execution** — Submit groups of tasks in a single request via `/tasks/batch`. Supports \"partial success\": valid tasks are queued while invalid ones are reported in the response.
+- 🔗 **Workflow primitives** — Chain and chord orchestration via `/tasks/chain` and `/tasks/chord`. Supports \"partial success\" for building the workflow segments.
 - 🛡️ **Input validation** — Pydantic-driven validation on `task_name`/`queue` at trust boundary
 - 📦 **Pydantic task params** — Tasks annotated with `BaseModel` subclasses get first-class payload models and OpenAPI schemas
 - 🪝 **Bridge hooks** — `pre_hooks`/`post_hooks` run around task dispatch (auth, audit, notify)
@@ -49,7 +49,7 @@ plain Celery.
 - 🔌 **WebSocket streaming** — Live task status updates via `/tasks/{task_id}/ws`
 - 📡 **Server-Sent Events** — Proxy-friendly status stream via `/tasks/{task_id}/events`
 - 🔐 **Secure by default** — Destructive endpoints are opt-in; one `api_key` protects the rest
-- ♻️ **Idempotency keys** — Retries with the same `Idempotency-Key` never double-submit
+- ♻️ **Idempotency keys** — Retries with the same `Idempotency-Key` never double-submit. Supported in-memory or distributed via Redis for multi-pod deployments.
 - 📈 **Prometheus metrics & OpenTelemetry** — Opt-in `/metrics` and dispatch spans
 - 🗓️ **Beat schedule listing** — Read-only `/schedules`
 - 🤖 **MCP server (experimental)** — Expose tasks as tools for AI agents

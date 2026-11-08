@@ -375,8 +375,12 @@ class BatchTaskRequest(BaseModel):
 class BatchTaskResponse(BaseModel):
     """Response model for batch task submission."""
 
-    group_id: str | None = Field(default=None, description="Group ID for the submitted batch")
-    task_ids: list[str] = Field(default_factory=list, description="Individual task IDs in the group")
+    group_id: str | None = Field(
+        default=None, description="Group ID for the submitted batch"
+    )
+    task_ids: list[str] = Field(
+        default_factory=list, description="Individual task IDs in the group"
+    )
     task_count: int = Field(description="Number of successfully submitted tasks")
     status: str = Field(default="PENDING", description="Group status")
     failures: list[dict[str, Any]] | None = Field(
@@ -524,10 +528,7 @@ class RedisIdempotencyStorage:
 
     def save(self, key: str, fingerprint: str, response: "TaskResponse") -> None:
         zkey = self._zkey(key)
-        payload = json.dumps({
-            "fp": fingerprint,
-            "resp": response.model_dump()
-        })
+        payload = json.dumps({"fp": fingerprint, "resp": response.model_dump()})
         self._client.setex(zkey, int(self._ttl), payload)
 
 
@@ -1110,7 +1111,10 @@ class CeleryFastAPIBridge:
             return None, "task_name is required"
 
         if item.task_name not in self._app_task_names:
-            return None, f"task '{item.task_name}' is not registered or exposed by this API"
+            return (
+                None,
+                f"task '{item.task_name}' is not registered or exposed by this API",
+            )
 
         model = self._task_models.get(item.task_name)
         if model is None:
@@ -1118,6 +1122,7 @@ class CeleryFastAPIBridge:
 
         try:
             import inspect
+
             task = self.celery_app.tasks.get(item.task_name)
             task_func = getattr(task, "run", None)
 
@@ -1138,13 +1143,21 @@ class CeleryFastAPIBridge:
                 if params and params[-1].kind == inspect.Parameter.VAR_POSITIONAL:
                     var_arg_name = params[-1].name
                     if var_arg_name not in combined_dict:
-                        pos_count = len([p for p in params[:-1] if p.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD])
+                        pos_count = len(
+                            [
+                                p
+                                for p in params[:-1]
+                                if p.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD
+                            ]
+                        )
                         combined_dict[var_arg_name] = provided_args[pos_count:]
 
-            combined_dict.update({
-                "queue": item.queue,
-                "countdown": item.countdown,
-            })
+            combined_dict.update(
+                {
+                    "queue": item.queue,
+                    "countdown": item.countdown,
+                }
+            )
             cleaned_dict = {k: v for k, v in combined_dict.items() if v is not None}
             return model.model_validate(cleaned_dict), None
         except Exception as exc:
@@ -1175,6 +1188,7 @@ class CeleryFastAPIBridge:
             Raises:
                 Nothing: unknown/not-started tasks report state PENDING.
             """
+
             # Wrapped in to_thread to prevent blocking the main event loop
             def fetch_status() -> dict[str, Any]:
                 result = AsyncResult(task_id, app=self.celery_app)
@@ -1447,9 +1461,7 @@ class CeleryFastAPIBridge:
             summary="Execute tasks in a chain",
             description="Execute multiple Celery tasks sequentially. Tasks are executed one after another, with the result of one task passed to the next.",
         )
-        def chain_tasks(
-            request: Request, payload: dict[str, Any]
-        ) -> BatchTaskResponse:
+        def chain_tasks(request: Request, payload: dict[str, Any]) -> BatchTaskResponse:
             """Execute tasks in a chain.
 
             Args:
@@ -1467,10 +1479,20 @@ class CeleryFastAPIBridge:
             try:
                 req = BatchTaskRequest.model_validate(payload)
             except Exception as exc:
-                raise HTTPException(status_code=422, detail=f"Invalid request body: {str(exc)}")
+                raise HTTPException(
+                    status_code=422, detail=f"Invalid request body: {str(exc)}"
+                )
 
             if not req.tasks:
                 raise HTTPException(status_code=422, detail="No tasks provided")
+
+            # Unexposed tasks are a security error, not a per-item validation failure.
+            for item in req.tasks:
+                if item.task_name not in self._app_task_names:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"task '{item.task_name}' is not registered in this app",
+                    )
 
             signatures = []
             failures = []
@@ -1480,8 +1502,9 @@ class CeleryFastAPIBridge:
                     failures.append({"index": i, "task": item.task_name, "error": err})
                     continue
 
-                queue = getattr(self.celery_app.tasks.get(item.task_name), "queue", None) or \
-                        (self.celery_app.conf.task_default_queue or "celery")
+                queue = getattr(
+                    self.celery_app.tasks.get(item.task_name), "queue", None
+                ) or (self.celery_app.conf.task_default_queue or "celery")
                 opts = self._build_send_options(validated, queue)
                 sig = self.celery_app.signature(item.task_name, **opts)
                 signatures.append(sig)
@@ -1554,13 +1577,22 @@ class CeleryFastAPIBridge:
                 else:
                     item_obj = item
 
+                if item_obj.task_name not in self._app_task_names:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"task '{item_obj.task_name}' is not registered in this app",
+                    )
+
                 validated, err = self._validate_batch_item(item_obj)
                 if err:
-                    failures.append({"index": i, "task": item_obj.task_name, "error": err})
+                    failures.append(
+                        {"index": i, "task": item_obj.task_name, "error": err}
+                    )
                     continue
 
-                queue = getattr(self.celery_app.tasks.get(item_obj.task_name), "queue", None) or \
-                        (self.celery_app.conf.task_default_queue or "celery")
+                queue = getattr(
+                    self.celery_app.tasks.get(item_obj.task_name), "queue", None
+                ) or (self.celery_app.conf.task_default_queue or "celery")
                 opts = self._build_send_options(validated, queue)
                 sig = self.celery_app.signature(item_obj.task_name, **opts)
                 header_signatures.append(sig)
@@ -1571,7 +1603,11 @@ class CeleryFastAPIBridge:
             callback_sig = self.celery_app.signature(callback_task_name)
 
             # chord syntax: chord(header)(callback).apply_async()
-            job = chord(header_signatures, body=callback_sig) if header_signatures else None
+            job = (
+                chord(header_signatures, body=callback_sig)
+                if header_signatures
+                else None
+            )
             result = job.apply_async() if job else None
 
             task_ids = []
@@ -1579,7 +1615,11 @@ class CeleryFastAPIBridge:
                 task_ids = [r.id for r in result.parent.children]
 
             for item in header_data:
-                tn = item.get("task_name") if isinstance(item, dict) else getattr(item, "task_name", None)
+                tn = (
+                    item.get("task_name")
+                    if isinstance(item, dict)
+                    else getattr(item, "task_name", None)
+                )
                 if tn in self._app_task_names:
                     self.metrics.inc("tasks_submitted_total", tn)
 
@@ -1989,6 +2029,14 @@ class CeleryFastAPIBridge:
             if not payload.tasks:
                 raise HTTPException(status_code=422, detail="No tasks provided")
 
+            # Unexposed tasks are a security error, not a per-item validation failure.
+            for item in payload.tasks:
+                if item.task_name not in self._app_task_names:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"task '{item.task_name}' is not registered in this app",
+                    )
+
             # Build Celery signatures for each task
             signatures = []
             failures = []
@@ -1998,8 +2046,9 @@ class CeleryFastAPIBridge:
                     failures.append({"index": i, "task": item.task_name, "error": err})
                     continue
 
-                queue = getattr(self.celery_app.tasks.get(item.task_name), "queue", None) or \
-                        (self.celery_app.conf.task_default_queue or "celery")
+                queue = getattr(
+                    self.celery_app.tasks.get(item.task_name), "queue", None
+                ) or (self.celery_app.conf.task_default_queue or "celery")
                 opts = self._build_send_options(validated, queue)
                 sig = self.celery_app.signature(item.task_name, **opts)
                 signatures.append(sig)

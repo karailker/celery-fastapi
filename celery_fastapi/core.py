@@ -1117,7 +1117,6 @@ class CeleryFastAPIBridge:
             return None, f"could not find validation model for task '{item.task_name}'"
 
         try:
-            # bridge the Gap between Celery's (args, kwargs) and Pydantic's flat attributes.
             import inspect
             task = self.celery_app.tasks.get(item.task_name)
             task_func = getattr(task, "run", None)
@@ -1126,9 +1125,21 @@ class CeleryFastAPIBridge:
             if task_func:
                 sig = inspect.signature(task_func)
                 params = list(sig.parameters.values())
-                for idx, arg in enumerate(item.args or []):
+
+                provided_args = item.args or []
+                for idx, arg in enumerate(provided_args):
                     if idx < len(params):
-                        combined_dict[params[idx].name] = arg
+                        param = params[idx]
+                        if param.kind == inspect.Parameter.VAR_POSITIONAL:
+                            combined_dict[param.name] = provided_args[idx:]
+                            break
+                        combined_dict[param.name] = arg
+
+                if params and params[-1].kind == inspect.Parameter.VAR_POSITIONAL:
+                    var_arg_name = params[-1].name
+                    if var_arg_name not in combined_dict:
+                        pos_count = len([p for p in params[:-1] if p.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD])
+                        combined_dict[var_arg_name] = provided_args[pos_count:]
 
             combined_dict.update({
                 "queue": item.queue,
@@ -1437,32 +1448,38 @@ class CeleryFastAPIBridge:
             description="Execute multiple Celery tasks sequentially. Tasks are executed one after another, with the result of one task passed to the next.",
         )
         def chain_tasks(
-            request: Request, payload: BatchTaskRequest
+            request: Request, payload: dict[str, Any]
         ) -> BatchTaskResponse:
             """Execute tasks in a chain.
 
             Args:
-                payload: BatchTaskRequest containing a list of tasks.
+                payload: Dictionary containing 'tasks' list.
 
             Returns:
                 BatchTaskResponse with group ID and individual task IDs.
             """
             from celery import chain
 
+            from celery_fastapi.core import BatchTaskRequest
+
             self._check_rate_limit(request)
 
-            if not payload.tasks:
+            try:
+                req = BatchTaskRequest.model_validate(payload)
+            except Exception as exc:
+                raise HTTPException(status_code=422, detail=f"Invalid request body: {str(exc)}")
+
+            if not req.tasks:
                 raise HTTPException(status_code=422, detail="No tasks provided")
 
             signatures = []
             failures = []
-            for i, item in enumerate(payload.tasks):
+            for i, item in enumerate(req.tasks):
                 validated, err = self._validate_batch_item(item)
                 if err:
                     failures.append({"index": i, "task": item.task_name, "error": err})
                     continue
 
-                # validated is the Pydantic model instance, use _build_send_options
                 queue = getattr(self.celery_app.tasks.get(item.task_name), "queue", None) or \
                         (self.celery_app.conf.task_default_queue or "celery")
                 opts = self._build_send_options(validated, queue)
@@ -1476,7 +1493,7 @@ class CeleryFastAPIBridge:
             result = job.apply_async() if job else None
             task_ids = [r.id for r in result.children or []] if result else []
 
-            for item in payload.tasks:
+            for item in req.tasks:
                 if item.task_name in self._app_task_names:
                     self.metrics.inc("tasks_submitted_total", item.task_name)
 
